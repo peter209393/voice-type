@@ -1,0 +1,20 @@
+[package]
+name = "sway-voice-type"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+crossbeam-channel = "0.5"
+cpal = "0.15"
+hound = "3.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+which = "6"
+
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+smithay-client-toolkit = { version = "0.20", features = ["xkbcommon"] }
+softbuffer = "0.4"
+tiny-skia = "0.11"
+ab_glyph = "0.2"

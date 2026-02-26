@@ -1,0 +1,185 @@
+use anyhow::{Context, Result};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crossbeam_channel::Sender;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use std::sync::OnceLock;
+
+static GLOBAL_SENDER: OnceLock<Sender<Vec<f32>>> = OnceLock::new();
+
+pub fn set_sender(tx: Sender<Vec<f32>>) {
+    let _ = GLOBAL_SENDER.set(tx);
+}
+
+fn send_chunk(chunk: Vec<f32>) {
+    if let Some(tx) = GLOBAL_SENDER.get() {
+        let _ = tx.try_send(chunk);
+    }
+}
+
+pub struct AudioEngine {
+    stream: cpal::Stream,
+    sample_rate: u32,
+    stopped: Arc<Mutex<bool>>,
+}
+
+impl AudioEngine {
+    pub fn start_default_input(
+        sample_rate_hint: Option<u32>,
+        _rx_clone: crossbeam_channel::Receiver<Vec<f32>>,
+    ) -> Result<Self> {
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .context("No default input device available")?;
+
+        let supported = device
+            .default_input_config()
+            .context("No default input config")?;
+        let mut config: cpal::StreamConfig = supported.clone().into();
+
+        if let Some(sr) = sample_rate_hint {
+            config.sample_rate.0 = sr;
+        }
+
+        let sample_rate = config.sample_rate.0;
+        let channels = config.channels as usize;
+
+        let stopped = Arc::new(Mutex::new(false));
+        let stopped_cb = stopped.clone();
+
+        let err_fn = move |err| eprintln!("audio stream error: {err}");
+
+        // We'll convert whatever sample format to f32 mono
+        let stream = match supported.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config,
+                move |data: &[f32], _| {
+                    if *stopped_cb.lock().unwrap() {
+                        return;
+                    }
+                    let mono = interleave_to_mono_f32(data, channels);
+                    send_chunk(mono);
+                },
+                err_fn,
+                None,
+            )?,
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config,
+                move |data: &[i16], _| {
+                    if *stopped_cb.lock().unwrap() {
+                        return;
+                    }
+                    let mono = interleave_to_mono_i16(data, channels);
+                    send_chunk(mono);
+                },
+                err_fn,
+                None,
+            )?,
+            cpal::SampleFormat::U16 => device.build_input_stream(
+                &config,
+                move |data: &[u16], _| {
+                    if *stopped_cb.lock().unwrap() {
+                        return;
+                    }
+                    let mono = interleave_to_mono_u16(data, channels);
+                    send_chunk(mono);
+                },
+                err_fn,
+                None,
+            )?,
+            other => anyhow::bail!("Unsupported sample format: {:?}", other),
+        };
+
+        stream.play().context("Failed to play input stream")?;
+
+        Ok(Self {
+            stream,
+            sample_rate,
+            stopped,
+        })
+    }
+
+    pub fn stop(self) {
+        if let Ok(mut s) = self.stopped.lock() {
+            *s = true;
+        }
+        drop(self.stream);
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
+fn interleave_to_mono_f32(data: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return data.to_vec();
+    }
+    let frames = data.len() / channels;
+    let mut out = Vec::with_capacity(frames);
+    for f in 0..frames {
+        let mut acc = 0.0f32;
+        for c in 0..channels {
+            acc += data[f * channels + c];
+        }
+        out.push(acc / channels as f32);
+    }
+    out
+}
+
+fn interleave_to_mono_i16(data: &[i16], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+    }
+    let frames = data.len() / channels;
+    let mut out = Vec::with_capacity(frames);
+    for f in 0..frames {
+        let mut acc = 0.0f32;
+        for c in 0..channels {
+            acc += data[f * channels + c] as f32 / i16::MAX as f32;
+        }
+        out.push(acc / channels as f32);
+    }
+    out
+}
+
+fn interleave_to_mono_u16(data: &[u16], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return data
+            .iter()
+            .map(|&s| (s as f32 - 32768.0) / 32768.0)
+            .collect();
+    }
+    let frames = data.len() / channels;
+    let mut out = Vec::with_capacity(frames);
+    for f in 0..frames {
+        let mut acc = 0.0f32;
+        for c in 0..channels {
+            acc += (data[f * channels + c] as f32 - 32768.0) / 32768.0;
+        }
+        out.push(acc / channels as f32);
+    }
+    out
+}
+
+pub fn write_wav_f32_mono(path: &Path, sample_rate: u32, samples: &[f32]) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut writer = hound::WavWriter::create(path, spec)
+        .with_context(|| format!("create wav {}", path.display()))?;
+
+    for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        writer.write_sample(v)?;
+    }
+
+    writer.finalize()?;
+    Ok(())
+}
