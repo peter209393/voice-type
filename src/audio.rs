@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::Sender;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use std::sync::OnceLock;
@@ -178,24 +177,4 @@ fn interleave_to_mono_u16(data: &[u16], channels: usize) -> Vec<f32> {
         out.push(acc / channels as f32);
     }
     out
-}
-
-pub fn write_wav_f32_mono(path: &Path, sample_rate: u32, samples: &[f32]) -> Result<()> {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut writer = hound::WavWriter::create(path, spec)
-        .with_context(|| format!("create wav {}", path.display()))?;
-
-    for &s in samples {
-        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        writer.write_sample(v)?;
-    }
-
-    writer.finalize()?;
-    Ok(())
 }

@@ -20,3 +20,4 @@ smithay-client-toolkit = { version = "0.20", features = ["xkbcommon"] }
 softbuffer = "0.4"
 tiny-skia = "0.11"
 ab_glyph = "0.2"
+whisper-rs = "0.15"

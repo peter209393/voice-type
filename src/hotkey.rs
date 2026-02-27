@@ -31,39 +31,41 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
     let mut found_key = None;
     let mut devices: Vec<Device> = Vec::new();
 
-    // First try to find devices that explicitly support the target keys
-    for (key, name) in &target_keys {
+    fn is_keyboard_device(d: &Device) -> bool {
+        let has_keys = d
+            .supported_keys()
+            .map_or(false, |keys| keys.iter().next().is_some());
+        let has_relative = d
+            .supported_relative_axes()
+            .map_or(false, |axes| axes.iter().next().is_some());
+        has_keys && !has_relative
+    }
+
+    for (key, _name) in &target_keys {
         let devs: Vec<Device> = evdev::enumerate()
             .map(|(_, d)| d)
             .filter(|d| {
-                d.supported_keys()
-                    .map(|keys| keys.contains(*key))
-                    .unwrap_or(false)
+                is_keyboard_device(d)
+                    && d.supported_keys()
+                        .map(|keys| keys.contains(*key))
+                        .unwrap_or(false)
             })
             .collect();
 
         if !devs.is_empty() {
-            eprintln!("[Hotkey] Found {} device(s) with {} key", devs.len(), name);
             devices = devs;
             found_key = Some(*key);
             break;
         }
     }
 
-    // Fallback: use any keyboard device if specific key detection failed
     if devices.is_empty() {
-        eprintln!("[Hotkey] Specific key detection failed, trying fallback to any keyboard device");
         let all_keyboards: Vec<Device> = evdev::enumerate()
             .map(|(_, d)| d)
-            .filter(|d| {
-                // Check if device supports any KEY events (has at least one key)
-                d.supported_keys()
-                    .map_or(false, |keys| keys.iter().next().is_some())
-            })
+            .filter(|d| is_keyboard_device(d))
             .collect();
 
         if !all_keyboards.is_empty() {
-            eprintln!("[Hotkey] Using {} keyboard device(s) as fallback", all_keyboards.len());
             devices = all_keyboards;
             found_key = Some(Key::KEY_RIGHTALT);
         }
@@ -84,13 +86,14 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
     let mut is_pressed = false;
 
     loop {
-        for device in &mut keyboard_devices {
+        for device in keyboard_devices.iter_mut() {
             if let Ok(events) = device.fetch_events() {
                 for event in events {
                     if event.event_type() == EventType::KEY {
                         if let InputEventKind::Key(key) = event.kind() {
+                            let value = event.value();
+
                             if key == target_key {
-                                let value = event.value();
                                 if value == 1 && !is_pressed {
                                     is_pressed = true;
                                     let _ = tx.try_send(HotkeyEvent::Pressed);

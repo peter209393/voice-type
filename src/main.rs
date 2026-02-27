@@ -1,12 +1,8 @@
 mod asr;
 mod audio;
-mod dsp;
 mod hotkey;
 mod overlay;
-mod statusbar;
-mod sway_focus;
 mod typewriter;
-mod vad;
 
 use anyhow::{Context, Result};
 use asr::StreamTranscriber;
@@ -14,27 +10,19 @@ use crossbeam_channel::{bounded, select};
 use hotkey::HotkeyEvent;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use vad::VoiceActivityDetector;
 
-const VAD_SILENCE_SECS: f32 = 1.5;
 const MIN_CHUNK_SAMPLES: usize = 8000;
+const TRANSCRIBE_INTERVAL_SECS: f64 = 0.5;
 
 #[derive(Clone, Debug)]
 pub enum UiState {
     Idle,
-    Recording { started_at: Instant },
+    Recording { started_at: Instant, text: String },
     Transcribing { started_at: Instant },
-    Typing { started_at: Instant },
     Done { text: String },
     Error { msg: String },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum State {
-    Idle,
-    Recording { started_at: Instant },
 }
 
 fn main() -> Result<()> {
@@ -66,34 +54,21 @@ fn main() -> Result<()> {
 
     let (cmd_tx, cmd_rx) = bounded::<overlay::OverlayCmd>(16);
 
-    let (_overlay_audio_tx, overlay_audio_rx) = bounded::<Vec<f32>>(64);
     let overlay_running = running.clone();
     std::thread::spawn(move || {
-        if let Err(e) = overlay::run_overlay(overlay_audio_rx, overlay_running, cmd_rx) {
+        if let Err(e) = overlay::run_overlay(overlay_running, cmd_rx) {
             eprintln!("Overlay error: {:#}", e);
         }
     });
 
-    let (status_tx, status_rx) = bounded::<statusbar::StatusBarCmd>(16);
-    let status_running = running.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = statusbar::run_status_bar(status_running, status_rx) {
-            eprintln!("Status bar error: {:#}", e);
-        }
-    });
+    let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Idle));
 
-    // Initialize status bar as idle
-    let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Idle));
-
-    println!("sway-voice-type stream mode");
-    println!("Hold Right Alt key to record, release to stop.");
-    println!("Audio will be transcribed in chunks during silence.");
-
-    let mut state = State::Idle;
     let mut buffer: Vec<f32> = Vec::new();
-    let mut vad = VoiceActivityDetector::new(VAD_SILENCE_SECS);
     let mut sample_rate: u32 = 44_100;
     let mut audio_engine: Option<audio::AudioEngine> = None;
+    let mut last_transcribe_time: Option<Instant> = None;
+    let typed_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let mut is_recording = false;
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -104,27 +79,30 @@ fn main() -> Result<()> {
             recv(hotkey_rx) -> event => {
                 match event {
                     Ok(HotkeyEvent::Pressed) => {
-                        if state == State::Idle {
-                            println!("[Recording started]");
+                        if !is_recording {
                             buffer.clear();
-                            vad.reset();
-                            let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Recording { started_at: Instant::now() }));
+                            typed_text.lock().unwrap().clear();
+                            last_transcribe_time = Some(Instant::now());
+                            let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Recording {
+                                started_at: Instant::now(),
+                                text: String::new()
+                            }));
 
                             match audio::AudioEngine::start_default_input(None) {
                                 Ok(engine) => {
                                     sample_rate = engine.sample_rate();
                                     audio_engine = Some(engine);
-                                    state = State::Recording { started_at: Instant::now() };
+                                    is_recording = true;
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to start recording: {:#}", e);
-                                    let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
+                                    let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Error { msg: e.to_string() }));
                                 }
                             }
                         }
                     }
                     Ok(HotkeyEvent::Released) => {
-                        if state != State::Idle {
+                        if is_recording {
                             if let Some(engine) = audio_engine.take() {
                                 engine.stop();
                             }
@@ -134,35 +112,28 @@ fn main() -> Result<()> {
                             }
 
                             if buffer.len() >= MIN_CHUNK_SAMPLES {
-                                println!("[Transcribing final chunk...]");
-                                let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Transcribing { started_at: Instant::now() }));
+                                let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Transcribing { started_at: Instant::now() }));
                                 match transcriber.transcribe_chunk(&buffer, sample_rate) {
                                     Ok(text) if !text.trim().is_empty() => {
-                                        println!("> {}", text.trim());
-                                        let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Typing { started_at: Instant::now() }));
                                         if let Err(e) = typewriter::type_text_auto(&text) {
                                             eprintln!("Failed to type: {:#}", e);
-                                            let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
                                         }
                                     }
-                                    Ok(text) => {
-                                        let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Done { text }));
-                                    }
+                                    Ok(_) => {}
                                     Err(e) => {
                                         eprintln!("Transcription error: {:#}", e);
-                                        let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
                                     }
                                 }
+                                let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Idle));
+                            } else {
+                                let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Idle));
                             }
 
                             buffer.clear();
-                            state = State::Idle;
-                            println!("[Recording stopped]");
-                            let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Idle));
+                            is_recording = false;
                         }
                     }
                     Err(_) => {
-                        eprintln!("Hotkey channel closed");
                         break;
                     }
                 }
@@ -170,46 +141,44 @@ fn main() -> Result<()> {
 
             recv(audio_rx) -> chunk => {
                 if let Ok(chunk) = chunk {
-                    if let State::Recording { .. } = state {
+                    if is_recording {
                         buffer.extend_from_slice(&chunk);
-                        vad.push_samples(&chunk);
 
-                        if vad.is_silence_timeout() && buffer.len() >= MIN_CHUNK_SAMPLES {
-                            println!("[VAD: silence detected, transcribing chunk...]");
-                            let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Transcribing { started_at: Instant::now() }));
+                        if let Some(last_time) = last_transcribe_time {
+                            let elapsed = last_time.elapsed().as_secs_f64();
+                            if elapsed >= TRANSCRIBE_INTERVAL_SECS && buffer.len() >= MIN_CHUNK_SAMPLES {
+                                let chunk_samples: Vec<f32> = buffer.drain(..).collect();
+                                let sr = sample_rate;
+                                let transcriber = Arc::clone(&transcriber);
+                                let cmd_tx_clone = cmd_tx.clone();
+                                let typed_text_clone = Arc::clone(&typed_text);
 
-                            let chunk_samples: Vec<f32> = buffer.drain(..).collect();
-                            vad.reset();
-
-                            let sr = sample_rate;
-                            let transcriber = Arc::clone(&transcriber);
-                            let status_tx_clone = status_tx.clone();
-                            std::thread::spawn(move || {
-                                match transcriber.transcribe_chunk(&chunk_samples, sr) {
-                                    Ok(text) if !text.trim().is_empty() => {
-                                        println!("> {}", text.trim());
-                                        let _ = status_tx_clone.send(statusbar::StatusBarCmd::UpdateState(UiState::Typing { started_at: Instant::now() }));
-                                        if let Err(e) = typewriter::type_text_auto(&text) {
-                                            eprintln!("Failed to type: {:#}", e);
-                                            let _ = status_tx_clone.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
+                                std::thread::spawn(move || {
+                                    match transcriber.transcribe_chunk(&chunk_samples, sr) {
+                                        Ok(text) if !text.trim().is_empty() => {
+                                            if let Err(e) = typewriter::type_text_auto(&text) {
+                                                eprintln!("Failed to type: {:#}", e);
+                                            }
+                                            let mut tt = typed_text_clone.lock().unwrap();
+                                            tt.push_str(&text);
+                                            let _ = cmd_tx_clone.send(overlay::OverlayCmd::UpdateState(UiState::Recording {
+                                                started_at: Instant::now(),
+                                                text: tt.clone()
+                                            }));
                                         }
+                                        _ => {}
                                     }
-                                    Ok(text) => {
-                                        let _ = status_tx_clone.send(statusbar::StatusBarCmd::UpdateState(UiState::Done { text }));
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Transcription error: {:#}", e);
-                                        let _ = status_tx_clone.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
-                                    }
-                                }
-                            });
+                                });
+
+                                last_transcribe_time = Some(Instant::now());
+                            }
                         }
                     }
                 }
             }
 
-            default(Duration::from_millis(10)) => {
-                if state == State::Idle {
+            default(Duration::from_millis(50)) => {
+                if !is_recording {
                     while let Ok(_) = audio_rx.try_recv() {}
                 }
             }
@@ -217,7 +186,6 @@ fn main() -> Result<()> {
     }
 
     let _ = cmd_tx.send(overlay::OverlayCmd::Quit);
-    let _ = status_tx.send(statusbar::StatusBarCmd::Quit);
     running.store(false, Ordering::SeqCst);
 
     Ok(())
