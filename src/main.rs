@@ -26,23 +26,16 @@ pub enum UiState {
 }
 
 fn main() -> Result<()> {
-    let whisper_model = std::env::var("WHISPER_MODEL").unwrap_or_else(|_| {
-        format!(
-            "{}/.local/share/whisper/ggml-small.bin",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    });
-    let whisper_bin = std::env::var("WHISPER_BIN").unwrap_or_else(|_| "whisper-cli".to_string());
-    let model_path = PathBuf::from(whisper_model);
-
-    if !model_path.exists() {
-        eprintln!(
-            "Warning: Whisper model not found at {}",
-            model_path.display()
-        );
+    // Check for required ZAI_API_TOKEN environment variable
+    if std::env::var("ZAI_API_TOKEN").is_err() {
+        eprintln!("Error: ZAI_API_TOKEN environment variable must be set");
+        eprintln!("Get your API key from https://z.ai");
+        std::process::exit(1);
     }
 
-    let transcriber = Arc::new(StreamTranscriber::new(&whisper_bin, &model_path));
+    // Dummy path - not used for API-based transcription
+    let dummy_path = PathBuf::from("/dev/null");
+    let transcriber = Arc::new(StreamTranscriber::new("", &dummy_path));
 
     let (audio_tx, audio_rx) = bounded::<Vec<f32>>(256);
     audio::add_sender(audio_tx);

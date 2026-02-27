@@ -1,23 +1,25 @@
-use anyhow::Result;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use anyhow::{Context, Result};
+use reqwest::multipart::{Form, Part};
+use std::io::Cursor;
 
 pub struct StreamTranscriber {
-    ctx: Arc<Mutex<WhisperContext>>,
+    api_token: String,
+    client: reqwest::Client,
 }
 
 impl StreamTranscriber {
-    pub fn new(_whisper_bin: &str, model_path: &Path) -> Self {
-        whisper_rs::install_logging_hooks();
+    pub fn new(_whisper_bin: &str, _model_path: &std::path::Path) -> Self {
+        let api_token = std::env::var("ZAI_API_TOKEN")
+            .expect("ZAI_API_TOKEN environment variable must be set");
 
-        let ctx_params = WhisperContextParameters::default();
-        let ctx =
-            WhisperContext::new_with_params(model_path.to_string_lossy().as_ref(), ctx_params)
-                .expect("Failed to load whisper model");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to build HTTP client");
 
         Self {
-            ctx: Arc::new(Mutex::new(ctx)),
+            api_token,
+            client,
         }
     }
 
@@ -26,46 +28,123 @@ impl StreamTranscriber {
             return Ok(String::new());
         }
 
-        let ctx = self
-            .ctx
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to lock whisper context"))?;
+        // Run async code in a blocking manner
+        let rt = tokio::runtime::Handle::try_current();
+        match rt {
+            Ok(handle) => handle.block_on(self.transcribe_chunk_async(samples, sample_rate)),
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .context("Failed to create tokio runtime")?;
+                rt.block_on(self.transcribe_chunk_async(samples, sample_rate))
+            }
+        }
+    }
 
-        let resample = if sample_rate != 16000 {
-            Some(resample_to_16k(samples, sample_rate))
+    async fn transcribe_chunk_async(&self, samples: &[f32], sample_rate: u32) -> Result<String> {
+        // Resample to 16kHz if needed (z.ai ASR model expects 16kHz)
+        let resampled = if sample_rate != 16000 {
+            resample_to_16k(samples, sample_rate)
         } else {
-            None
+            samples.to_vec()
         };
 
-        let audio_data = resample.as_ref().map(|r| r.as_slice()).unwrap_or(samples);
+        // Encode to WAV format
+        let wav_bytes = encode_wav(&resampled, 16000)?;
 
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("auto"));
-        params.set_translate(false);
-        params.set_no_context(true);
-        params.set_single_segment(true);
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_suppress_blank(true);
+        // Create multipart form
+        let file_part = Part::bytes(wav_bytes)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .context("Failed to create file part")?;
 
-        let mut state = ctx.create_state()?;
-        state.full(params, audio_data)?;
+        let form = Form::new()
+            .text("model", "glm-asr-2512")
+            .text("stream", "true")
+            .part("file", file_part);
 
-        let num_segments = state.full_n_segments();
-        let mut result = String::new();
+        // Send request to z.ai API
+        let response = self
+            .client
+            .post("https://api.z.ai/api/paas/v4/audio/transcriptions")
+            .header("Authorization", format!("Bearer {}", self.api_token))
+            .multipart(form)
+            .send()
+            .await
+            .context("Failed to send transcription request")?;
 
-        for i in 0..num_segments {
-            if let Some(segment) = state.get_segment(i) {
-                if let Ok(text) = segment.to_str_lossy() {
-                    result.push_str(&text);
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            anyhow::bail!("API request failed: {} - {}", status, error_text);
+        }
+
+        // Handle streaming response
+        let text = self.handle_stream_async(response).await?;
+
+        Ok(clean_text(&text))
+    }
+
+    async fn handle_stream_async(&self, response: reqwest::Response) -> Result<String> {
+        use futures_util::StreamExt;
+
+        let mut text_parts = Vec::new();
+        let mut stream = response.bytes_stream();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.context("Failed to read stream chunk")?;
+            let chunk_str = String::from_utf8_lossy(&chunk);
+
+            // Parse SSE format: "data: {...}\n\n"
+            for line in chunk_str.lines() {
+                let line = line.trim();
+                if line.starts_with("data: ") {
+                    let data = &line[6..];
+
+                    if data == "[DONE]" {
+                        break;
+                    }
+
+                    // Try to parse as JSON
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
+                            text_parts.push(text.to_string());
+                        }
+                    }
                 }
             }
         }
 
-        Ok(clean_text(&result))
+        Ok(text_parts.join(""))
     }
+}
+
+fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
+    let mut cursor = Cursor::new(Vec::new());
+
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut writer = hound::WavWriter::new(&mut cursor, spec)
+        .context("Failed to create WAV writer")?;
+
+    // Convert f32 (-1.0 to 1.0) to i16
+    for &sample in samples {
+        let int_sample = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        writer
+            .write_sample(int_sample)
+            .context("Failed to write sample")?;
+    }
+
+    writer.finalize().context("Failed to finalize WAV")?;
+
+    Ok(cursor.into_inner())
 }
 
 fn clean_text(text: &str) -> String {
