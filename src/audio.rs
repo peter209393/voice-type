@@ -6,15 +6,23 @@ use std::sync::{Arc, Mutex};
 
 use std::sync::OnceLock;
 
-static GLOBAL_SENDER: OnceLock<Sender<Vec<f32>>> = OnceLock::new();
+static GLOBAL_SENDERS: OnceLock<Mutex<Vec<Sender<Vec<f32>>>>> = OnceLock::new();
 
-pub fn set_sender(tx: Sender<Vec<f32>>) {
-    let _ = GLOBAL_SENDER.set(tx);
+fn senders() -> &'static Mutex<Vec<Sender<Vec<f32>>>> {
+    GLOBAL_SENDERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn add_sender(tx: Sender<Vec<f32>>) {
+    if let Ok(mut s) = senders().lock() {
+        s.push(tx);
+    }
 }
 
 fn send_chunk(chunk: Vec<f32>) {
-    if let Some(tx) = GLOBAL_SENDER.get() {
-        let _ = tx.try_send(chunk);
+    if let Ok(senders) = senders().lock() {
+        for tx in senders.iter() {
+            let _ = tx.try_send(chunk.clone());
+        }
     }
 }
 
@@ -25,14 +33,23 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn start_default_input(
-        sample_rate_hint: Option<u32>,
-        _rx_clone: crossbeam_channel::Receiver<Vec<f32>>,
-    ) -> Result<Self> {
+    pub fn start_default_input(sample_rate_hint: Option<u32>) -> Result<Self> {
         let host = cpal::default_host();
+
         let device = host
-            .default_input_device()
-            .context("No default input device available")?;
+            .input_devices()
+            .ok()
+            .and_then(|mut devices| {
+                devices.find(|d| {
+                    if let Ok(name) = d.name() {
+                        name.contains("pipewire") || name.contains("CARD=") || name.contains("Mic")
+                    } else {
+                        false
+                    }
+                })
+            })
+            .or_else(|| host.default_input_device())
+            .context("No input device available")?;
 
         let supported = device
             .default_input_config()
@@ -51,7 +68,6 @@ impl AudioEngine {
 
         let err_fn = move |err| eprintln!("audio stream error: {err}");
 
-        // We'll convert whatever sample format to f32 mono
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config,

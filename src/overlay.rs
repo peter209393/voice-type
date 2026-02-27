@@ -94,7 +94,7 @@ impl OverlayInner {
 
         let breath = (self.breath_phase.sin() * 0.5 + 0.5) as f32;
         let base_alpha = match state {
-            UiState::Recording => 0.6 + breath * 0.3,
+            UiState::Recording { .. } => 0.6 + breath * 0.3,
             UiState::Transcribing { .. } | UiState::Typing { .. } => 0.5 + breath * 0.2,
             _ => 0.3,
         };
@@ -128,7 +128,7 @@ impl OverlayInner {
             });
 
         let accent_color = match state {
-            UiState::Recording => (80u8, 200u8, 255u8),
+            UiState::Recording { .. } => (80u8, 200u8, 255u8),
             UiState::Transcribing { .. } => (255, 200, 80),
             UiState::Typing { .. } => (200, 80, 255),
             UiState::Done { .. } => (80, 255, 140),

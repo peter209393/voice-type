@@ -1,41 +1,39 @@
 mod asr;
 mod audio;
 mod dsp;
+mod hotkey;
 mod overlay;
 mod sway_focus;
 mod typewriter;
+mod vad;
 
 use anyhow::{Context, Result};
-use crossbeam_channel::{bounded, TryRecvError};
-use dsp::{LevelMeter, Oscilloscope};
+use asr::StreamTranscriber;
+use crossbeam_channel::{bounded, select};
+use hotkey::HotkeyEvent;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use vad::VoiceActivityDetector;
 
-#[derive(Clone, Debug)]
-pub struct VizFrame {
-    pub osc: Vec<f32>,
-    pub db: f32,
-    pub peak: f32,
-    pub rms: f32,
-}
+const VAD_SILENCE_SECS: f32 = 1.5;
+const MIN_CHUNK_SAMPLES: usize = 8000;
 
 #[derive(Clone, Debug)]
 pub enum UiState {
     Idle,
-    Recording,
+    Recording { started_at: Instant },
     Transcribing { started_at: Instant },
     Typing { started_at: Instant },
     Done { text: String },
     Error { msg: String },
 }
 
-#[derive(Clone)]
-struct AppConfig {
-    whisper_model: PathBuf,
-    whisper_bin: String,
-    sample_rate_hint: Option<u32>,
+#[derive(Clone, Debug, PartialEq)]
+enum State {
+    Idle,
+    Recording { started_at: Instant },
 }
 
 fn main() -> Result<()> {
@@ -46,146 +44,148 @@ fn main() -> Result<()> {
         )
     });
     let whisper_bin = std::env::var("WHISPER_BIN").unwrap_or_else(|_| "whisper-cli".to_string());
+    let model_path = PathBuf::from(whisper_model);
 
-    let cfg = AppConfig {
-        whisper_model: PathBuf::from(whisper_model),
-        whisper_bin,
-        sample_rate_hint: None,
-    };
+    if !model_path.exists() {
+        eprintln!(
+            "Warning: Whisper model not found at {}",
+            model_path.display()
+        );
+    }
 
-    let (audio_tx, audio_rx) = bounded::<Vec<f32>>(64);
-    let (cmd_tx, cmd_rx) = bounded::<overlay::OverlayCmd>(16);
+    let transcriber = Arc::new(StreamTranscriber::new(&whisper_bin, &model_path));
 
-    audio::set_sender(audio_tx);
+    let (audio_tx, audio_rx) = bounded::<Vec<f32>>(256);
+    audio::add_sender(audio_tx);
 
     let running = Arc::new(AtomicBool::new(true));
-    let running_overlay = running.clone();
-    let running_main = running.clone();
 
-    let overlay_thread = std::thread::spawn(move || {
-        if let Err(e) = overlay::run_overlay(audio_rx, running_overlay, cmd_rx) {
+    let hotkey_rx = hotkey::start_hotkey_listener()
+        .context("Failed to start hotkey listener. Make sure you have input group permissions.")?;
+
+    let (cmd_tx, cmd_rx) = bounded::<overlay::OverlayCmd>(16);
+
+    let (_overlay_audio_tx, overlay_audio_rx) = bounded::<Vec<f32>>(64);
+    let overlay_running = running.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = overlay::run_overlay(overlay_audio_rx, overlay_running, cmd_rx) {
             eprintln!("Overlay error: {:#}", e);
         }
     });
 
-    println!("sway-voice-type overlay running");
-    println!("Commands: start, stop, type, q");
+    println!("sway-voice-type stream mode");
+    println!("Hold Meta/Win key to record, release to stop.");
+    println!("Audio will be transcribed in chunks during silence.");
 
-    let stdin = std::io::stdin();
-    let mut line = String::new();
+    let mut state = State::Idle;
+    let mut buffer: Vec<f32> = Vec::new();
+    let mut vad = VoiceActivityDetector::new(VAD_SILENCE_SECS);
+    let mut sample_rate: u32 = 44_100;
     let mut audio_engine: Option<audio::AudioEngine> = None;
-    let mut recorded: Vec<f32> = Vec::new();
-    let mut meter = LevelMeter::new();
-    let mut scope = Oscilloscope::new(2048);
-    let mut sample_rate = 48_000u32;
-
-    let (_record_tx, record_rx) = bounded::<Vec<f32>>(1024);
 
     loop {
-        if !running_main.load(Ordering::SeqCst) {
+        if !running.load(Ordering::SeqCst) {
             break;
         }
 
-        line.clear();
-        if stdin.read_line(&mut line).is_err() {
-            break;
-        }
-        let cmd = line.trim();
+        select! {
+            recv(hotkey_rx) -> event => {
+                match event {
+                    Ok(HotkeyEvent::Pressed) => {
+                        if state == State::Idle {
+                            println!("[Recording started]");
+                            buffer.clear();
+                            vad.reset();
 
-        match cmd {
-            "start" => {
-                if audio_engine.is_none() {
-                    recorded.clear();
-                    meter.reset();
-                    scope.reset();
-                    match audio::AudioEngine::start_default_input(
-                        cfg.sample_rate_hint,
-                        record_rx.clone(),
-                    ) {
-                        Ok(engine) => {
-                            sample_rate = engine.sample_rate();
-                            audio_engine = Some(engine);
-                            println!("Recording...");
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to start recording: {:#}", e);
+                            match audio::AudioEngine::start_default_input(None) {
+                                Ok(engine) => {
+                                    sample_rate = engine.sample_rate();
+                                    audio_engine = Some(engine);
+                                    state = State::Recording { started_at: Instant::now() };
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to start recording: {:#}", e);
+                                }
+                            }
                         }
                     }
-                }
-            }
-            "stop" => {
-                if let Some(engine) = audio_engine.take() {
-                    engine.stop();
-                    println!("Stopped. {} samples recorded.", recorded.len());
-                }
-            }
-            "type" | "transcribe" => {
-                if audio_engine.is_some() {
-                    if let Some(engine) = audio_engine.take() {
-                        engine.stop();
-                    }
-                }
+                    Ok(HotkeyEvent::Released) => {
+                        if state != State::Idle {
+                            if let Some(engine) = audio_engine.take() {
+                                engine.stop();
+                            }
 
-                if recorded.is_empty() {
-                    println!("No audio recorded.");
-                    continue;
-                }
+                            while let Ok(chunk) = audio_rx.try_recv() {
+                                buffer.extend_from_slice(&chunk);
+                            }
 
-                let tmp_dir = std::env::temp_dir();
-                let wav_path = tmp_dir.join(format!("sway-voice-type-{}.wav", std::process::id()));
-                audio::write_wav_f32_mono(&wav_path, sample_rate, &recorded)
-                    .with_context(|| format!("Failed writing wav to {}", wav_path.display()))?;
+                            if buffer.len() >= MIN_CHUNK_SAMPLES {
+                                println!("[Transcribing final chunk...]");
+                                match transcriber.transcribe_chunk(&buffer, sample_rate) {
+                                    Ok(text) if !text.trim().is_empty() => {
+                                        println!("> {}", text.trim());
+                                        if let Err(e) = typewriter::type_text_auto(&text) {
+                                            eprintln!("Failed to type: {:#}", e);
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => eprintln!("Transcription error: {:#}", e),
+                                }
+                            }
 
-                println!("Transcribing...");
-                sway_focus::focus_prev().ok();
-
-                match asr::transcribe_with_whisper_cli(
-                    &cfg.whisper_bin,
-                    &cfg.whisper_model,
-                    &wav_path,
-                ) {
-                    Ok(text) => {
-                        println!("Text: {}", text);
-                        println!("Typing...");
-                        if let Err(e) = typewriter::type_text_auto(&text) {
-                            eprintln!("Failed to type: {:#}", e);
-                        } else {
-                            println!("Done.");
+                            buffer.clear();
+                            state = State::Idle;
+                            println!("[Recording stopped]");
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Transcription failed: {:#}", e);
+                    Err(_) => {
+                        eprintln!("Hotkey channel closed");
+                        break;
                     }
                 }
             }
-            "q" | "quit" | "exit" => {
-                if let Some(engine) = audio_engine.take() {
-                    engine.stop();
-                }
-                running.store(false, Ordering::SeqCst);
-                let _ = cmd_tx.send(overlay::OverlayCmd::Quit);
-                break;
-            }
-            _ => {
-                if !cmd.is_empty() {
-                    println!("Unknown command: {}", cmd);
-                }
-            }
-        }
 
-        loop {
-            match record_rx.try_recv() {
-                Ok(chunk) => {
-                    recorded.extend_from_slice(&chunk);
-                    meter.push_samples(&chunk);
-                    scope.push_samples(&chunk);
+            recv(audio_rx) -> chunk => {
+                if let Ok(chunk) = chunk {
+                    if let State::Recording { .. } = state {
+                        buffer.extend_from_slice(&chunk);
+                        vad.push_samples(&chunk);
+
+                        if vad.is_silence_timeout() && buffer.len() >= MIN_CHUNK_SAMPLES {
+                            println!("[VAD: silence detected, transcribing chunk...]");
+
+                            let chunk_samples: Vec<f32> = buffer.drain(..).collect();
+                            vad.reset();
+
+                            let sr = sample_rate;
+                            let transcriber = Arc::clone(&transcriber);
+                            std::thread::spawn(move || {
+                                match transcriber.transcribe_chunk(&chunk_samples, sr) {
+                                    Ok(text) if !text.trim().is_empty() => {
+                                        println!("> {}", text.trim());
+                                        if let Err(e) = typewriter::type_text_auto(&text) {
+                                            eprintln!("Failed to type: {:#}", e);
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => eprintln!("Transcription error: {:#}", e),
+                                }
+                            });
+                        }
+                    }
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+            }
+
+            default(Duration::from_millis(10)) => {
+                if state == State::Idle {
+                    while let Ok(_) = audio_rx.try_recv() {}
+                }
             }
         }
     }
 
-    let _ = overlay_thread.join();
+    let _ = cmd_tx.send(overlay::OverlayCmd::Quit);
+    running.store(false, Ordering::SeqCst);
+
     Ok(())
 }
