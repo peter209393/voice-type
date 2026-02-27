@@ -24,13 +24,14 @@ pub fn start_hotkey_listener() -> Result<Receiver<HotkeyEvent>> {
 
 fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
     let target_keys = [
-        (Key::KEY_RIGHTMETA, "Right Meta"),
-        (Key::KEY_LEFTMETA, "Left Meta"),
+        (Key::KEY_RIGHTALT, "Right Alt"),
+        (Key::KEY_LEFTALT, "Left Alt"),
     ];
 
     let mut found_key = None;
     let mut devices: Vec<Device> = Vec::new();
 
+    // First try to find devices that explicitly support the target keys
     for (key, name) in &target_keys {
         let devs: Vec<Device> = evdev::enumerate()
             .map(|(_, d)| d)
@@ -49,9 +50,28 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
         }
     }
 
+    // Fallback: use any keyboard device if specific key detection failed
+    if devices.is_empty() {
+        eprintln!("[Hotkey] Specific key detection failed, trying fallback to any keyboard device");
+        let all_keyboards: Vec<Device> = evdev::enumerate()
+            .map(|(_, d)| d)
+            .filter(|d| {
+                // Check if device supports any KEY events (has at least one key)
+                d.supported_keys()
+                    .map_or(false, |keys| keys.iter().next().is_some())
+            })
+            .collect();
+
+        if !all_keyboards.is_empty() {
+            eprintln!("[Hotkey] Using {} keyboard device(s) as fallback", all_keyboards.len());
+            devices = all_keyboards;
+            found_key = Some(Key::KEY_RIGHTALT);
+        }
+    }
+
     if devices.is_empty() {
         anyhow::bail!(
-            "No keyboard device found with Meta/Super key.\n\
+            "No keyboard device found.\n\
              Please ensure:\n\
              1. You are in the 'input' group: sudo usermod -a -G input $USER\n\
              2. Log out and back in for group changes to take effect\n\

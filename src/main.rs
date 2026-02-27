@@ -3,6 +3,7 @@ mod audio;
 mod dsp;
 mod hotkey;
 mod overlay;
+mod statusbar;
 mod sway_focus;
 mod typewriter;
 mod vad;
@@ -73,8 +74,19 @@ fn main() -> Result<()> {
         }
     });
 
+    let (status_tx, status_rx) = bounded::<statusbar::StatusBarCmd>(16);
+    let status_running = running.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = statusbar::run_status_bar(status_running, status_rx) {
+            eprintln!("Status bar error: {:#}", e);
+        }
+    });
+
+    // Initialize status bar as idle
+    let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Idle));
+
     println!("sway-voice-type stream mode");
-    println!("Hold Meta/Win key to record, release to stop.");
+    println!("Hold Right Alt key to record, release to stop.");
     println!("Audio will be transcribed in chunks during silence.");
 
     let mut state = State::Idle;
@@ -96,6 +108,7 @@ fn main() -> Result<()> {
                             println!("[Recording started]");
                             buffer.clear();
                             vad.reset();
+                            let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Recording { started_at: Instant::now() }));
 
                             match audio::AudioEngine::start_default_input(None) {
                                 Ok(engine) => {
@@ -105,6 +118,7 @@ fn main() -> Result<()> {
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to start recording: {:#}", e);
+                                    let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
                                 }
                             }
                         }
@@ -121,21 +135,30 @@ fn main() -> Result<()> {
 
                             if buffer.len() >= MIN_CHUNK_SAMPLES {
                                 println!("[Transcribing final chunk...]");
+                                let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Transcribing { started_at: Instant::now() }));
                                 match transcriber.transcribe_chunk(&buffer, sample_rate) {
                                     Ok(text) if !text.trim().is_empty() => {
                                         println!("> {}", text.trim());
+                                        let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Typing { started_at: Instant::now() }));
                                         if let Err(e) = typewriter::type_text_auto(&text) {
                                             eprintln!("Failed to type: {:#}", e);
+                                            let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
                                         }
                                     }
-                                    Ok(_) => {}
-                                    Err(e) => eprintln!("Transcription error: {:#}", e),
+                                    Ok(text) => {
+                                        let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Done { text }));
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Transcription error: {:#}", e);
+                                        let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
+                                    }
                                 }
                             }
 
                             buffer.clear();
                             state = State::Idle;
                             println!("[Recording stopped]");
+                            let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Idle));
                         }
                     }
                     Err(_) => {
@@ -153,22 +176,31 @@ fn main() -> Result<()> {
 
                         if vad.is_silence_timeout() && buffer.len() >= MIN_CHUNK_SAMPLES {
                             println!("[VAD: silence detected, transcribing chunk...]");
+                            let _ = status_tx.send(statusbar::StatusBarCmd::UpdateState(UiState::Transcribing { started_at: Instant::now() }));
 
                             let chunk_samples: Vec<f32> = buffer.drain(..).collect();
                             vad.reset();
 
                             let sr = sample_rate;
                             let transcriber = Arc::clone(&transcriber);
+                            let status_tx_clone = status_tx.clone();
                             std::thread::spawn(move || {
                                 match transcriber.transcribe_chunk(&chunk_samples, sr) {
                                     Ok(text) if !text.trim().is_empty() => {
                                         println!("> {}", text.trim());
+                                        let _ = status_tx_clone.send(statusbar::StatusBarCmd::UpdateState(UiState::Typing { started_at: Instant::now() }));
                                         if let Err(e) = typewriter::type_text_auto(&text) {
                                             eprintln!("Failed to type: {:#}", e);
+                                            let _ = status_tx_clone.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
                                         }
                                     }
-                                    Ok(_) => {}
-                                    Err(e) => eprintln!("Transcription error: {:#}", e),
+                                    Ok(text) => {
+                                        let _ = status_tx_clone.send(statusbar::StatusBarCmd::UpdateState(UiState::Done { text }));
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Transcription error: {:#}", e);
+                                        let _ = status_tx_clone.send(statusbar::StatusBarCmd::UpdateState(UiState::Error { msg: e.to_string() }));
+                                    }
                                 }
                             });
                         }
@@ -185,6 +217,7 @@ fn main() -> Result<()> {
     }
 
     let _ = cmd_tx.send(overlay::OverlayCmd::Quit);
+    let _ = status_tx.send(statusbar::StatusBarCmd::Quit);
     running.store(false, Ordering::SeqCst);
 
     Ok(())
