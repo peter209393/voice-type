@@ -1,7 +1,7 @@
 mod asr;
 mod audio;
 mod hotkey;
-mod overlay;
+mod tray;
 mod typewriter;
 
 use anyhow::{Context, Result};
@@ -52,16 +52,16 @@ fn main() -> Result<()> {
     let hotkey_rx = hotkey::start_hotkey_listener()
         .context("Failed to start hotkey listener. Make sure you have input group permissions.")?;
 
-    let (cmd_tx, cmd_rx) = bounded::<overlay::OverlayCmd>(16);
+    let (cmd_tx, cmd_rx) = bounded::<tray::TrayCmd>(16);
 
-    let overlay_running = running.clone();
+    let tray_running = running.clone();
     std::thread::spawn(move || {
-        if let Err(e) = overlay::run_overlay(overlay_running, cmd_rx) {
-            eprintln!("Overlay error: {:#}", e);
+        if let Err(e) = tray::run_tray(tray_running, cmd_rx) {
+            eprintln!("Tray error: {:#}", e);
         }
     });
 
-    let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Idle));
+    let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Idle));
 
     let mut buffer: Vec<f32> = Vec::new();
     let mut sample_rate: u32 = 44_100;
@@ -83,7 +83,7 @@ fn main() -> Result<()> {
                             buffer.clear();
                             typed_text.lock().unwrap().clear();
                             last_transcribe_time = Some(Instant::now());
-                            let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Recording {
+                            let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Recording {
                                 started_at: Instant::now(),
                                 text: String::new()
                             }));
@@ -96,7 +96,7 @@ fn main() -> Result<()> {
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to start recording: {:#}", e);
-                                    let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Error { msg: e.to_string() }));
+                                    let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Error { msg: e.to_string() }));
                                 }
                             }
                         }
@@ -112,7 +112,7 @@ fn main() -> Result<()> {
                             }
 
                             if buffer.len() >= MIN_CHUNK_SAMPLES {
-                                let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Transcribing { started_at: Instant::now() }));
+                                let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Transcribing { started_at: Instant::now() }));
                                 match transcriber.transcribe_chunk(&buffer, sample_rate) {
                                     Ok(text) if !text.trim().is_empty() => {
                                         if let Err(e) = typewriter::type_text_auto(&text) {
@@ -124,9 +124,9 @@ fn main() -> Result<()> {
                                         eprintln!("Transcription error: {:#}", e);
                                     }
                                 }
-                                let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Idle));
+                                let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Idle));
                             } else {
-                                let _ = cmd_tx.send(overlay::OverlayCmd::UpdateState(UiState::Idle));
+                                let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Idle));
                             }
 
                             buffer.clear();
@@ -161,7 +161,7 @@ fn main() -> Result<()> {
                                             }
                                             let mut tt = typed_text_clone.lock().unwrap();
                                             tt.push_str(&text);
-                                            let _ = cmd_tx_clone.send(overlay::OverlayCmd::UpdateState(UiState::Recording {
+                                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Recording {
                                                 started_at: Instant::now(),
                                                 text: tt.clone()
                                             }));
@@ -185,7 +185,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let _ = cmd_tx.send(overlay::OverlayCmd::Quit);
+    let _ = cmd_tx.send(tray::TrayCmd::Quit);
     running.store(false, Ordering::SeqCst);
 
     Ok(())
