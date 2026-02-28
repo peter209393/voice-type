@@ -1,89 +1,139 @@
-# sway-voice-type
+# Voice Type
 
-**TLDR: Built because there's no good open-source, hands-free voice typing tool for Sway/Wayland — no dictation daemon, no Dragon, no Google Docs. Just hold Alt, speak, and your words appear.**
-
-A lightweight, open-source push-to-talk voice dictation tool for Sway and Wayland. Hold Alt to record, release to transcribe via the [z.ai](https://z.ai) ASR API, and have the result typed at your cursor — no GUI, no clipboard, no paste.
+A cross-platform voice-to-text application that types what you speak. Hold a hotkey to record, release to transcribe and type.
 
 ## Features
 
-- Push-to-talk with Right/Left Alt key — no always-on microphone
-- Streaming transcription every 0.5s while recording for low latency
-- Auto-types via `wtype` (preferred) or `ydotool` fallback — works in any app
-- System tray icon showing live state (idle / recording / transcribing / error)
-- Tiny binary, zero configuration files
+- **Cross-platform**: Linux (X11/Wayland) and macOS
+- **Native UI**: System tray icon + recording popup near cursor
+- **Real-time transcription**: Uses Z.AI API for accurate speech recognition
+- **Global hotkey**: Hold Alt/Option to record, release to type
+
+## Supported Platforms
+
+| Platform | Hotkey | Typing | Tray | Popup |
+|----------|--------|--------|------|-------|
+| Linux (Wayland) | Alt | wtype, ydotool | ksni | GTK |
+| Linux (X11) | Alt | xdotool, ydotool | ksni | GTK |
+| macOS | Option | enigo | NSStatusItem | NSWindow |
 
 ## Requirements
 
-- Sway or any Wayland compositor
-- `wtype` or `ydotool` installed and in `PATH`
-- A [z.ai](https://z.ai) API key (`ZAI_API_TOKEN`)
-- Membership in the `input` group (for keyboard event access via evdev)
+### Linux
+- `input` group membership for hotkey detection:
+  ```bash
+  sudo usermod -a -G input $USER
+  # Log out and back in for changes to take effect
+  ```
 
-## Setup
+- Typing tool (install one):
+  ```bash
+  # Wayland (recommended)
+  sudo pacman -S wtype      # Arch
+  sudo apt install wtype    # Debian/Ubuntu
 
-### 1. Add yourself to the `input` group
+  # X11
+  sudo apt install xdotool
 
-```sh
-sudo usermod -a -G input $USER
-# Log out and back in for this to take effect
-```
+  # Universal (works on both)
+  sudo pacman -S ydotool    # Arch
+  yay -S ydotool
+  ```
 
-### 2. Install a typing tool
+### macOS
+- Accessibility permissions:
+  - System Settings → Privacy & Security → Accessibility
+  - Add the app to the list
 
-```sh
-# Arch Linux
-sudo pacman -S wtype
-# or
-sudo pacman -S ydotool
-```
+## Installation
 
-### 3. Set your API key
+### From Source
 
-```sh
-export ZAI_API_TOKEN=your_key_here
-```
+```bash
+git clone https://github.com/yourname/voice-type.git
+cd voice-type
 
-Add to your shell profile (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`) to persist across sessions.
-
-## Build & Run
-
-```sh
+# Linux (default, ksni tray)
 cargo build --release
-./target/release/sway-voice-type
-```
 
-Or run directly:
+# Linux (GTK tray - for XFCE, MATE, etc.)
+cargo build --release --features gtk-tray
 
-```sh
-ZAI_API_TOKEN=your_key cargo run --release
+# macOS
+cargo build --release
 ```
 
 ## Usage
 
-1. Run the binary — a tray icon appears (muted mic = idle)
-2. **Hold Alt** to start recording (icon changes to record indicator)
-3. **Speak** — partial transcriptions are typed in real time every 0.5s
-4. **Release Alt** — final chunk is transcribed, typed, and the tool returns to idle
+1. Set your API token:
+   ```bash
+   export ZAI_API_TOKEN=your_token_here
+   ```
 
-The typed text appears wherever your cursor is focused — terminal, browser, editor, chat app, anything.
+2. Run the application:
+   ```bash
+   ./target/release/voice-type
+   ```
 
-## Autostart with Sway
+3. Hold **Alt** (Linux) or **Option** (macOS) to start recording
+4. Speak your text
+5. Release the key to transcribe and type
 
+## Autostart
+
+### Linux (Sway)
 Add to `~/.config/sway/config`:
+```
+exec env ZAI_API_TOKEN=your_key /path/to/voice-type
+```
 
+### Linux (systemd)
+Create `~/.config/systemd/user/voice-type.service`:
+```ini
+[Unit]
+Description=Voice Type
+After=graphical-session.target
+
+[Service]
+Environment=ZAI_API_TOKEN=your_token_here
+ExecStart=/path/to/voice-type
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
 ```
-exec env ZAI_API_TOKEN=your_key $HOME/.cargo/bin/sway-voice-type
+
+Then:
+```bash
+systemctl --user enable --now voice-type
 ```
+
+### macOS
+Add to Login Items in System Settings → General → Login Items.
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `ZAI_API_TOKEN` | API token from z.ai | Yes |
+
+## Building Features
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `gtk-tray` | Use GTK/libappindicator for tray (XFCE, MATE) | No |
 
 ## Troubleshooting
 
 | Problem | Fix |
-|---|---|
+|---------|-----|
 | "No keyboard device found" | Add yourself to the `input` group and re-login |
-| "Neither wtype nor ydotool found" | Install `wtype` or `ydotool` and ensure they are in `PATH` |
+| "No typing tool found" | Install `wtype`, `ydotool`, or `xdotool` |
 | API errors / auth failure | Check that `ZAI_API_TOKEN` is set and valid |
-| No tray icon | Ensure your bar supports StatusNotifierItem (e.g. waybar with `tray` module enabled) |
-| Text typed twice | Only run one instance of `sway-voice-type` at a time |
+| No tray icon | Ensure your bar supports StatusNotifierItem (waybar, etc.) |
+| macOS: Typing doesn't work | Grant Accessibility permissions in System Settings |
 
 ## License
 

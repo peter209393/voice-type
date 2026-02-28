@@ -34,10 +34,10 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
     fn is_keyboard_device(d: &Device) -> bool {
         let has_keys = d
             .supported_keys()
-            .map_or(false, |keys| keys.iter().next().is_some());
+            .is_some_and(|keys| keys.iter().next().is_some());
         let has_relative = d
             .supported_relative_axes()
-            .map_or(false, |axes| axes.iter().next().is_some());
+            .is_some_and(|axes| axes.iter().next().is_some());
         has_keys && !has_relative
     }
 
@@ -62,7 +62,7 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
     if devices.is_empty() {
         let all_keyboards: Vec<Device> = evdev::enumerate()
             .map(|(_, d)| d)
-            .filter(|d| is_keyboard_device(d))
+            .filter(is_keyboard_device)
             .collect();
 
         if !all_keyboards.is_empty() {

@@ -29,13 +29,13 @@ impl Tray for VoiceTypeTray {
     }
 
     fn title(&self) -> String {
-        "Sway Voice Type".to_string()
+        "Voice Type".to_string()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
         let (title, desc) = match &self.state {
             UiState::Idle => ("Idle", "Press hotkey to start recording"),
-            UiState::Recording { text, .. } => ("Recording", text.as_str()),
+            UiState::Recording { .. } => ("Recording", "Speak now..."),
             UiState::Transcribing { .. } => ("Transcribing", "Processing audio..."),
             UiState::Done { text } => ("Done", text.as_str()),
             UiState::Error { msg } => ("Error", msg.as_str()),
@@ -55,16 +55,11 @@ pub fn run_tray(running: Arc<AtomicBool>, cmd_rx: Receiver<TrayCmd>) -> anyhow::
     let service = TrayService::new(tray);
     let handle = service.handle();
 
-    std::thread::spawn(move || loop {
-        match cmd_rx.recv() {
-            Ok(TrayCmd::UpdateState(state)) => {
-                handle.update(|t: &mut VoiceTypeTray| {
-                    t.state = state;
-                });
-            }
-            Ok(TrayCmd::Quit) | Err(_) => {
-                break;
-            }
+    std::thread::spawn(move || {
+        while let Ok(TrayCmd::UpdateState(state)) = cmd_rx.recv() {
+            handle.update(|t: &mut VoiceTypeTray| {
+                t.state = state;
+            });
         }
     });
 

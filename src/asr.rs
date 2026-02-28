@@ -100,14 +100,11 @@ impl StreamTranscriber {
             // Parse SSE format: "data: {...}\n\n"
             for line in chunk_str.lines() {
                 let line = line.trim();
-                if line.starts_with("data: ") {
-                    let data = &line[6..];
-
+                if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
                         break;
                     }
 
-                    // Try to parse as JSON
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                         if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
                             text_parts.push(text.to_string());

@@ -41,7 +41,22 @@ impl AudioEngine {
             .and_then(|mut devices| {
                 devices.find(|d| {
                     if let Ok(name) = d.name() {
-                        name.contains("pipewire") || name.contains("CARD=") || name.contains("Mic")
+                        #[cfg(target_os = "linux")]
+                        {
+                            name.contains("pipewire")
+                                || name.contains("CARD=")
+                                || name.contains("Mic")
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            name.contains("MacBook")
+                                || name.contains("Microphone")
+                                || name.contains("Built-in")
+                        }
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                        {
+                            true
+                        }
                     } else {
                         false
                     }

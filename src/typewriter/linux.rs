@@ -15,11 +15,14 @@ pub fn type_text_auto(text: &str) -> Result<()> {
         return type_with_ydotool(text);
     }
 
-    bail!("Neither wtype nor ydotool found in PATH");
+    if which("xdotool").is_ok() {
+        return type_with_xdotool(text);
+    }
+
+    bail!("No typing tool found. Install one of: wtype, ydotool, or xdotool");
 }
 
 fn type_with_wtype(text: &str) -> Result<()> {
-    // wtype reads argument as literal string; newlines ok but may behave per app.
     let status = Command::new("wtype")
         .arg(text)
         .status()
@@ -32,7 +35,6 @@ fn type_with_wtype(text: &str) -> Result<()> {
 }
 
 fn type_with_ydotool(text: &str) -> Result<()> {
-    // ydotool type -- "text"
     let status = Command::new("ydotool")
         .args(["type", "--", text])
         .status()
@@ -40,6 +42,18 @@ fn type_with_ydotool(text: &str) -> Result<()> {
 
     if !status.success() {
         bail!("ydotool exited with {:?}", status.code());
+    }
+    Ok(())
+}
+
+fn type_with_xdotool(text: &str) -> Result<()> {
+    let status = Command::new("xdotool")
+        .args(["type", "--clearmodifiers", "--", text])
+        .status()
+        .context("Failed to execute xdotool")?;
+
+    if !status.success() {
+        bail!("xdotool exited with {:?}", status.code());
     }
     Ok(())
 }
