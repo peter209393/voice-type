@@ -2,24 +2,40 @@ use anyhow::{Context, Result};
 use reqwest::multipart::{Form, Part};
 use std::io::Cursor;
 
+/// Transcribes PCM audio via the local faster-whisper HTTP server.
+///
+/// The server is expected to expose an OpenAI-compatible endpoint:
+///   POST {asr_url}/v1/audio/transcriptions  (multipart `file`)
+/// returning `{"text": "..."}`.
 pub struct StreamTranscriber {
-    api_token: String,
+    asr_url: String,
     client: reqwest::Client,
+    /// Persistent runtime so the connection pool bound to it stays valid
+    /// across transcription calls. Recreating a runtime per call would
+    /// orphan the pooled TLS connections (bound to the dropped runtime's
+    /// reactor) and break every request after the first.
+    runtime: tokio::runtime::Runtime,
 }
 
 impl StreamTranscriber {
     pub fn new(_whisper_bin: &str, _model_path: &std::path::Path) -> Self {
-        let api_token = std::env::var("ZAI_API_TOKEN")
-            .expect("ZAI_API_TOKEN environment variable must be set");
+        let asr_url = std::env::var("VT_ASR_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8000".to_string());
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build tokio runtime");
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("Failed to build HTTP client");
 
         Self {
-            api_token,
+            asr_url,
             client,
+            runtime,
         }
     }
 
@@ -28,20 +44,15 @@ impl StreamTranscriber {
             return Ok(String::new());
         }
 
-        // Run async code in a blocking manner
-        let rt = tokio::runtime::Handle::try_current();
-        match rt {
-            Ok(handle) => handle.block_on(self.transcribe_chunk_async(samples, sample_rate)),
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .context("Failed to create tokio runtime")?;
-                rt.block_on(self.transcribe_chunk_async(samples, sample_rate))
-            }
-        }
+        // Always drive the request from the same persistent runtime so the
+        // client's pooled connections keep working on every call.
+        self.runtime
+            .handle()
+            .block_on(self.transcribe_chunk_async(samples, sample_rate))
     }
 
     async fn transcribe_chunk_async(&self, samples: &[f32], sample_rate: u32) -> Result<String> {
-        // Resample to 16kHz if needed (z.ai ASR model expects 16kHz)
+        // Resample to 16kHz if needed (Whisper expects 16kHz)
         let resampled = if sample_rate != 16000 {
             resample_to_16k(samples, sample_rate)
         } else {
@@ -51,26 +62,21 @@ impl StreamTranscriber {
         // Encode to WAV format
         let wav_bytes = encode_wav(&resampled, 16000)?;
 
-        // Create multipart form
         let file_part = Part::bytes(wav_bytes)
             .file_name("audio.wav")
             .mime_str("audio/wav")
             .context("Failed to create file part")?;
 
-        let form = Form::new()
-            .text("model", "glm-asr-2512")
-            .text("stream", "true")
-            .part("file", file_part);
+        let form = Form::new().part("file", file_part);
 
-        // Send request to z.ai API
+        let url = format!("{}/v1/audio/transcriptions", self.asr_url.trim_end_matches('/'));
         let response = self
             .client
-            .post("https://api.z.ai/api/paas/v4/audio/transcriptions")
-            .header("Authorization", format!("Bearer {}", self.api_token))
+            .post(&url)
             .multipart(form)
             .send()
             .await
-            .context("Failed to send transcription request")?;
+            .with_context(|| format!("Failed to send transcription request to {}", url))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -78,43 +84,22 @@ impl StreamTranscriber {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            anyhow::bail!("API request failed: {} - {}", status, error_text);
+            anyhow::bail!("ASR request failed: {} - {}", status, error_text);
         }
 
-        // Handle streaming response
-        let text = self.handle_stream_async(response).await?;
+        // Plain JSON response: {"text": "..."}
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse ASR JSON response")?;
+
+        let text = json
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
 
         Ok(clean_text(&text))
-    }
-
-    async fn handle_stream_async(&self, response: reqwest::Response) -> Result<String> {
-        use futures_util::StreamExt;
-
-        let mut text_parts = Vec::new();
-        let mut stream = response.bytes_stream();
-
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.context("Failed to read stream chunk")?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-
-            // Parse SSE format: "data: {...}\n\n"
-            for line in chunk_str.lines() {
-                let line = line.trim();
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        break;
-                    }
-
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
-                            text_parts.push(text.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(text_parts.join(""))
     }
 }
 

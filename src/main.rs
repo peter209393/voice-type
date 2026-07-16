@@ -1,5 +1,6 @@
 mod asr;
 mod audio;
+mod correct;
 mod hotkey;
 mod popup;
 mod tray;
@@ -7,6 +8,7 @@ mod typewriter;
 
 use anyhow::{Context, Result};
 use asr::StreamTranscriber;
+use correct::Corrector;
 use crossbeam_channel::{bounded, select};
 use hotkey::HotkeyEvent;
 use std::path::PathBuf;
@@ -26,12 +28,6 @@ pub enum UiState {
 }
 
 fn main() -> Result<()> {
-    if std::env::var("ZAI_API_TOKEN").is_err() {
-        eprintln!("Error: ZAI_API_TOKEN environment variable must be set");
-        eprintln!("Get your API key from https://z.ai");
-        std::process::exit(1);
-    }
-
     #[cfg(target_os = "linux")]
     popup::init_gtk()?;
 
@@ -40,6 +36,7 @@ fn main() -> Result<()> {
 
     let dummy_path = PathBuf::from("/dev/null");
     let transcriber = Arc::new(StreamTranscriber::new("", &dummy_path));
+    let corrector = Arc::new(Corrector::new());
 
     let (audio_tx, audio_rx) = bounded::<Vec<f32>>(256);
     audio::add_sender(audio_tx);
@@ -118,15 +115,67 @@ fn main() -> Result<()> {
                                 let samples = buffer.clone();
                                 let sr = sample_rate;
                                 let transcriber = Arc::clone(&transcriber);
+                                let corrector = Arc::clone(&corrector);
                                 let cmd_tx_clone = cmd_tx.clone();
 
                                 std::thread::spawn(move || {
                                     match transcriber.transcribe_chunk(&samples, sr) {
-                                        Ok(text) if !text.trim().is_empty() => {
-                                            if let Err(e) = typewriter::type_text_auto(&text) {
-                                                eprintln!("Failed to type: {:#}", e);
+                                        Ok(raw) if !raw.trim().is_empty() => {
+                                            // 1. Type the raw ASR text immediately for fast
+                                            //    feedback, and remember how many chars we
+                                            //    emitted so we can backspace over them later.
+                                            if let Err(e) = typewriter::type_text_auto(&raw) {
+                                                eprintln!("Failed to type raw text: {:#}", e);
                                             }
-                                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Done { text }));
+                                            let raw_chars = raw.chars().count();
+                                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
+                                                UiState::Done { text: raw.clone() },
+                                            ));
+
+                                            // 2. Background-correct with the small LLM and, if
+                                            //    it differs, backspace over the raw text and
+                                            //    type the corrected version.
+                                            if corrector.enabled() {
+                                                eprintln!("[vt] raw ({raw_chars} chars): {:?}", raw);
+                                                match corrector.correct(&raw) {
+                                                    Ok(corrected) => {
+                                                        eprintln!("[vt] corrected: {:?}", corrected);
+                                                        if corrected.trim().is_empty() {
+                                                            eprintln!("[vt] corrected empty, skip replace");
+                                                        } else if corrected.trim() == raw.trim() {
+                                                            eprintln!("[vt] corrected == raw, skip replace");
+                                                        } else {
+                                                            eprintln!("[vt] replacing: backspace({}) then type", raw_chars);
+                                                            if let Err(e) =
+                                                                typewriter::backspace(raw_chars)
+                                                            {
+                                                                eprintln!(
+                                                                    "[vt] backspace FAILED: {:#}",
+                                                                    e
+                                                                );
+                                                            }
+                                                            if let Err(e) = typewriter::type_text_auto(
+                                                                &corrected,
+                                                            ) {
+                                                                eprintln!(
+                                                                    "[vt] type corrected FAILED: {:#}",
+                                                                    e
+                                                                );
+                                                            }
+                                                            let _ = cmd_tx_clone.send(
+                                                                tray::TrayCmd::UpdateState(
+                                                                    UiState::Done {
+                                                                        text: corrected,
+                                                                    },
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("[vt] correction error: {:#}", e);
+                                                    }
+                                                }
+                                            }
                                         }
                                         Ok(_) => {
                                             let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Idle));

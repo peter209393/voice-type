@@ -7,6 +7,9 @@ mod linux_gtk;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod icons;
+
 #[cfg(all(target_os = "linux", not(feature = "gtk-tray")))]
 pub use linux_ksni::{run_tray, TrayCmd};
 

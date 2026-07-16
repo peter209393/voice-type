@@ -1,21 +1,97 @@
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, TryRecvError};
+use gtk::prelude::*;
 
 use crate::UiState;
+use crate::tray::icons::{ICON_SIZE, IconData, icon_for_state};
 
 pub enum TrayCmd {
     UpdateState(UiState),
     Quit,
 }
 
+/// Icon name registered in our private theme path for each UI state.
+fn state_icon_name(state: &UiState) -> &'static str {
+    match state {
+        UiState::Idle => "voice-type-idle",
+        UiState::Recording { .. } => "voice-type-recording",
+        UiState::Transcribing { .. } => "voice-type-transcribing",
+        UiState::Done { .. } => "voice-type-done",
+        UiState::Error { .. } => "voice-type-error",
+    }
+}
+
+/// Write an RGBA buffer to `<dir>/<W x H>/apps/<name>.png` (hicolor layout).
+fn write_icon_png(dir: &Path, name: &str, icon: &IconData) -> anyhow::Result<()> {
+    let sub = dir
+        .join(format!("{}x{}", ICON_SIZE, ICON_SIZE))
+        .join("apps");
+    std::fs::create_dir_all(&sub)?;
+    let path = sub.join(format!("{}.png", name));
+
+    let bytes = gtk::glib::Bytes::from_owned(icon.rgba.clone());
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_bytes(
+        &bytes,
+        gtk::gdk_pixbuf::Colorspace::Rgb,
+        true,
+        8,
+        icon.width,
+        icon.height,
+        icon.width * 4,
+    );
+    pixbuf
+        .savev(&path, "png", &[])
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+/// Render every state's icon to PNG under a per-process private theme path,
+/// so the tray icon does not depend on the active system icon theme.
+fn install_icon_theme() -> anyhow::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("voice-type-icons-{}", std::process::id()));
+    // Fresh dir each launch: remove any stale content from a crashed prior run.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+
+    let states: [(UiState, &str); 5] = [
+        (UiState::Idle, "voice-type-idle"),
+        (
+            UiState::Recording { started_at: Instant::now() },
+            "voice-type-recording",
+        ),
+        (
+            UiState::Transcribing { started_at: Instant::now() },
+            "voice-type-transcribing",
+        ),
+        (UiState::Done { text: String::new() }, "voice-type-done"),
+        (UiState::Error { msg: String::new() }, "voice-type-error"),
+    ];
+    for (state, name) in &states {
+        let icon = icon_for_state(state);
+        write_icon_png(&dir, name, &icon)?;
+    }
+    Ok(dir)
+}
+
 pub fn run_tray(running: Arc<AtomicBool>, cmd_rx: Receiver<TrayCmd>) -> anyhow::Result<()> {
-    use gtk::prelude::*;
     use libappindicator::AppIndicator;
 
-    let indicator = RefCell::new(AppIndicator::new("Voice Type", "audio-input-microphone"));
+    let theme_path = install_icon_theme()?;
+    let theme_path_str = theme_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF-8 icon temp path"))?
+        .to_string();
+
+    let indicator = RefCell::new(AppIndicator::with_path(
+        "Voice Type",
+        "voice-type-idle",
+        &theme_path_str,
+    ));
 
     let mut menu = gtk::Menu::new();
 
@@ -64,17 +140,9 @@ pub fn run_tray(running: Arc<AtomicBool>, cmd_rx: Receiver<TrayCmd>) -> anyhow::
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
         match rx.try_recv() {
             Ok(Some(state)) => {
-                let icon_name = match &state {
-                    UiState::Idle => "microphone-sensitivity-muted",
-                    UiState::Recording { .. } => "media-record",
-                    UiState::Transcribing { .. } => "audio-input-microphone",
-                    UiState::Done { .. } => "dialog-ok",
-                    UiState::Error { .. } => "dialog-error",
-                };
-
                 indicator
                     .borrow_mut()
-                    .set_icon_full(icon_name, "Voice Type");
+                    .set_icon_full(state_icon_name(&state), "Voice Type");
 
                 let status_text = match &state {
                     UiState::Idle => "Voice Type - Idle".to_string(),
@@ -96,6 +164,7 @@ pub fn run_tray(running: Arc<AtomicBool>, cmd_rx: Receiver<TrayCmd>) -> anyhow::
 
     gtk::main();
 
+    let _ = std::fs::remove_dir_all(&theme_path);
     Ok(())
 }
 

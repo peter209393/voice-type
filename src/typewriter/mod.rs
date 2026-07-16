@@ -5,7 +5,7 @@ mod linux;
 mod macos;
 
 #[cfg(target_os = "linux")]
-pub use linux::type_text_auto;
+pub use linux::{backspace, type_text_auto};
 
 #[cfg(target_os = "macos")]
-pub use macos::type_text_auto;
+pub use macos::{backspace, type_text_auto};
