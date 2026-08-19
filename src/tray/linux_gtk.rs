@@ -81,6 +81,9 @@ fn install_icon_theme() -> anyhow::Result<PathBuf> {
 pub fn run_tray(running: Arc<AtomicBool>, cmd_rx: Receiver<TrayCmd>) -> anyhow::Result<()> {
     use libappindicator::AppIndicator;
 
+    // The popup module is gone; this feature now owns GTK initialization.
+    gtk::init().map_err(|e| anyhow::anyhow!("Failed to init GTK: {e}"))?;
+
     let theme_path = install_icon_theme()?;
     let theme_path_str = theme_path
         .to_str()

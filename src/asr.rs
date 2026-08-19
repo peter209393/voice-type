@@ -152,7 +152,7 @@ fn clean_text(text: &str) -> String {
     words.join(" ")
 }
 
-fn resample_to_16k(samples: &[f32], from_rate: u32) -> Vec<f32> {
+pub(crate) fn resample_to_16k(samples: &[f32], from_rate: u32) -> Vec<f32> {
     if from_rate == 16000 {
         return samples.to_vec();
     }
