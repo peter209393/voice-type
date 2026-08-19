@@ -435,7 +435,10 @@ fn main() -> Result<()> {
                 Ok(VolcEvent::Ready) => vlog!("volc: ready"),
                     Ok(VolcEvent::Partial(text)) => {
                         // Live preview: type the delta at the cursor while
-                        // still recording.
+                        // still recording. The hotkey is remapped to a
+                        // non-modifier keycode at startup (see hotkey module),
+                        // so the synthetic text is never polluted by a held
+                        // modifier.
                         vlog!("volc: partial {:?}", text);
                         if !text.is_empty() {
                             typed.type_towards(&text);
@@ -499,6 +502,10 @@ fn main() -> Result<()> {
 
     let _ = cmd_tx.send(tray::TrayCmd::Quit);
     running.store(false, Ordering::SeqCst);
+
+    // Restore the remapped hotkey scancode so the physical key behaves
+    // normally again once we exit.
+    hotkey::shutdown();
 
     Ok(())
 }
