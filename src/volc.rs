@@ -168,6 +168,14 @@ impl VolcSession {
     }
 }
 
+macro_rules! vlog {
+    ($($arg:tt)*) => {
+        if std::env::var_os("VT_LOG").is_some_and(|v| !v.is_empty()) {
+            eprintln!("[vt/volc] {}", format!($($arg)*));
+        }
+    };
+}
+
 async fn run(
     cmd_rx: &mut mpsc::Receiver<VolcCmd>,
     ev: Sender<VolcEvent>,
@@ -187,6 +195,7 @@ async fn run(
         .map_err(|_| anyhow::anyhow!("timed out connecting to VolcEngine ASR"))?
         .context("failed to connect to VolcEngine ASR")?;
     let _ = ev.try_send(VolcEvent::Ready);
+    vlog!("connected");
 
     let (mut write, mut read) = ws.split();
 
@@ -196,6 +205,7 @@ async fn run(
         .await
         .context("failed to send ASR full request")?;
     let mut seq: i32 = 2;
+    vlog!("full request sent");
 
     // Pending 16 kHz mono s16le PCM bytes waiting to be segmented.
     let mut pcm: Vec<u8> = Vec::new();
@@ -209,12 +219,14 @@ async fn run(
             cmd = cmd_rx.recv(), if !finished => {
                 match cmd {
                     Some(VolcCmd::Audio { samples, sample_rate }) => {
+                        vlog!("audio cmd: {} samples @ {}", samples.len(), sample_rate);
                         for s in resample_to_16k(&samples, sample_rate) {
                             let b = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                             pcm.extend_from_slice(&b.to_le_bytes());
                         }
                         while pcm.len() >= seg_bytes {
                             let seg: Vec<u8> = pcm.drain(..seg_bytes).collect();
+                            vlog!("sending audio packet seq={}", seq);
                             write
                                 .send(Message::Binary(audio_request(seq, &seg, false)?.into()))
                                 .await
@@ -223,6 +235,7 @@ async fn run(
                         }
                     }
                     Some(VolcCmd::Finish) | None => {
+                        vlog!("finish cmd; sending last packet seq={}", seq);
                         let tail = std::mem::take(&mut pcm);
                         write
                             .send(Message::Binary(audio_request(seq, &tail, true)?.into()))
@@ -242,6 +255,7 @@ async fn run(
                     Some(Ok(Message::Binary(data))) => {
                         let frame = parse_frame(&data)?;
                         let text = extract_text(&frame.payload);
+                        vlog!("server frame: is_last={} text={:?}", frame.is_last, text);
                         if !text.is_empty() {
                             last_text = text.clone();
                         }
@@ -464,11 +478,12 @@ mod tests {
     fn server_full_frame(seq: i32, payload: &Value, is_last: bool) -> Vec<u8> {
         let body = gzip(payload.to_string().as_bytes()).unwrap();
         let flags = FLAG_POS_SEQUENCE | if is_last { FLAG_SERVER_LAST } else { 0 };
-        let mut out = Vec::new();
-        out.push(0x11);
-        out.push((MSG_SERVER_FULL_RESPONSE << 4) | flags);
-        out.push((SERIALIZATION_JSON << 4) | COMPRESSION_GZIP);
-        out.push(0);
+        let mut out = vec![
+            0x11u8,
+            (MSG_SERVER_FULL_RESPONSE << 4) | flags,
+            (SERIALIZATION_JSON << 4) | COMPRESSION_GZIP,
+            0,
+        ];
         out.extend_from_slice(&seq.to_be_bytes());
         out.extend_from_slice(&(body.len() as u32).to_be_bytes());
         out.extend_from_slice(&body);
@@ -496,11 +511,12 @@ mod tests {
     #[test]
     fn parse_error_frame() {
         let body = gzip(br#"{"message":"bad key"}"#).unwrap();
-        let mut frame = Vec::new();
-        frame.push(0x11);
-        frame.push(MSG_SERVER_ERROR << 4);
-        frame.push((SERIALIZATION_JSON << 4) | COMPRESSION_GZIP);
-        frame.push(0);
+        let mut frame = vec![
+            0x11u8,
+            MSG_SERVER_ERROR << 4,
+            (SERIALIZATION_JSON << 4) | COMPRESSION_GZIP,
+            0,
+        ];
         frame.extend_from_slice(&45000003i32.to_be_bytes());
         frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
         frame.extend_from_slice(&body);

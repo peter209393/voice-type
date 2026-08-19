@@ -2962,6 +2962,7 @@ dependencies = [
  "hound",
  "ksni",
  "libappindicator",
+ "libc",
  "objc",
  "rdev",
  "reqwest",

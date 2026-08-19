@@ -25,6 +25,7 @@ tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 evdev = "0.12"
 ksni = "0.2"
 gtk = "0.18"
+libc = "0.2"
 libappindicator = { version = "0.9", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

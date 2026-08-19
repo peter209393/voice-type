@@ -39,7 +39,7 @@ impl AudioEngine {
             .input_devices()
             .ok()
             .and_then(|mut devices| {
-                devices.find(|d| {
+                let picked = devices.find(|d| {
                     if let Ok(name) = d.name() {
                         #[cfg(target_os = "linux")]
                         {
@@ -60,7 +60,21 @@ impl AudioEngine {
                     } else {
                         false
                     }
-                })
+                });
+                if std::env::var_os("VT_LOG").is_some_and(|v| !v.is_empty()) {
+                    if let Ok(devs) = host.input_devices() {
+                        let names: Vec<String> = devs
+                            .filter_map(|d| d.name().ok())
+                            .collect();
+                        eprintln!(
+                            "[vt] input devices: {:?}; picked: {:?}; default: {:?}",
+                            names,
+                            picked.as_ref().and_then(|d| d.name().ok()),
+                            host.default_input_device().and_then(|d| d.name().ok())
+                        );
+                    }
+                }
+                picked
             })
             .or_else(|| host.default_input_device())
             .context("No input device available")?;

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use evdev::{Device, EventType, InputEventKind, Key};
+use std::os::unix::io::AsRawFd;
 use std::thread;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,6 +85,20 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
     let target_key = found_key.unwrap();
     let mut keyboard_devices = devices;
     let mut is_pressed = false;
+
+    // evdev opens devices with BLOCKING fds: a `fetch_events` on a device
+    // with no pending events would park this thread until *that* device
+    // fires, silently swallowing hotkey events arriving on the other
+    // monitored devices (press/release went missing sporadically because of
+    // this). Switch every fd to non-blocking so the polling loop below
+    // actually polls.
+    for device in keyboard_devices.iter_mut() {
+        let fd = device.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        }
+    }
 
     loop {
         for device in keyboard_devices.iter_mut() {
