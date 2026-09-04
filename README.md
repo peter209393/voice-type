@@ -74,6 +74,14 @@ Voice Type shares its credentials with the [`pi-voice-input`](https://github.com
 }
 ```
 
+To avoid any dependency on pi's config file, set the key directly via
+environment variables instead:
+
+```bash
+export VT_VOLC_API_KEY="your-key"        # no file is read at all
+export VT_VOLC_BOOSTING_TABLE_ID="..."   # optional hotwords corpus
+```
+
 Get a key at <https://console.volcengine.com/speech/new/setting/apikeys?projectName=default>. When the key is present, Voice Type automatically uses the VolcEngine *streaming* endpoint: while you hold the hotkey, the recognized text is typed **live into the focused input box at your cursor** as you speak. When the ASR rewrites earlier words, the divergence is backspaced and retyped automatically. If the cloud call fails, Voice Type falls back to the local whisper server for that utterance.
 
 ### faster-whisper ASR server (optional local fallback)
@@ -200,6 +208,8 @@ Add to Login Items in System Settings → General → Login Items.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `VT_ASR_PROVIDER` | `auto` | ASR backend: `auto` (VolcEngine when its key is configured, else whisper), `volc` (force VolcEngine), `whisper` (force local) |
+| `VT_VOLC_API_KEY` | unset | VolcEngine API key set directly via env var — takes precedence and skips reading any config file |
+| `VT_VOLC_BOOSTING_TABLE_ID` | unset | VolcEngine boosting (hotwords) table id, paired with `VT_VOLC_API_KEY` |
 | `VT_VOLC_CONFIG` | `~/.pi/agent/voice-input.config.json` | Path to the shared VolcEngine/pi-voice-input config |
 | `VT_ASR_URL` | `http://127.0.0.1:8000` | faster-whisper ASR server base URL |
 | `VT_ASR_MODEL` | `medium` | faster-whisper model (`tiny`/`base`/`small`/`medium`/`large-v3`) |

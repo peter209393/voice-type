@@ -54,7 +54,29 @@ pub struct VolcConfig {
 
 /// Loads the shared pi-voice-input config. Returns an error if the file
 /// cannot be read/parsed (callers treat a missing/empty key as "unavailable").
+/// Loads the VolcEngine credentials.
+///
+/// Priority:
+///   1. `VT_VOLC_API_KEY` env var (optionally `VT_VOLC_BOOSTING_TABLE_ID`)
+///      — no file needed at all
+///   2. `VT_VOLC_CONFIG` env var — path to a JSON config file
+///   3. `~/.pi/agent/voice-input.config.json` (shared with the pi
+///      voice-input extension)
 pub fn load_config() -> Result<VolcConfig> {
+    if let Ok(key) = std::env::var("VT_VOLC_API_KEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            return Ok(VolcConfig {
+                api_key: key,
+                boosting_table_id: std::env::var("VT_VOLC_BOOSTING_TABLE_ID")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                config_path: PathBuf::from("<VT_VOLC_API_KEY>"),
+            });
+        }
+    }
+
     let path = std::env::var("VT_VOLC_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_config_path());
@@ -119,7 +141,8 @@ impl VolcSession {
         let cfg = load_config()?;
         if cfg.api_key.is_empty() {
             bail!(
-                "VolcEngine API key missing in {} (set it with /voice key inside pi)",
+                "VolcEngine API key missing: set VT_VOLC_API_KEY, or configure \
+                 volcApiKey in {} (e.g. via /voice key inside pi)",
                 cfg.config_path.display()
             );
         }
@@ -474,6 +497,22 @@ fn maybe_gunzip(data: &[u8], compression: u8) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn env_api_key_takes_precedence_over_files() {
+        // Point the file fallback at a nonexistent path: if the env var is
+        // honored, no file is ever read.
+        std::env::set_var("VT_VOLC_CONFIG", "/nonexistent/voice-input.config.json");
+        std::env::set_var("VT_VOLC_API_KEY", "test-key-from-env");
+        std::env::set_var("VT_VOLC_BOOSTING_TABLE_ID", "tbl-123");
+        let cfg = load_config().unwrap();
+        assert_eq!(cfg.api_key, "test-key-from-env");
+        assert_eq!(cfg.boosting_table_id, "tbl-123");
+        assert_eq!(cfg.config_path, PathBuf::from("<VT_VOLC_API_KEY>"));
+        std::env::remove_var("VT_VOLC_API_KEY");
+        std::env::remove_var("VT_VOLC_BOOSTING_TABLE_ID");
+        std::env::remove_var("VT_VOLC_CONFIG");
+    }
 
     fn server_full_frame(seq: i32, payload: &Value, is_last: bool) -> Vec<u8> {
         let body = gzip(payload.to_string().as_bytes()).unwrap();
