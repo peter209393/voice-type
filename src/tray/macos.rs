@@ -11,8 +11,10 @@ pub enum TrayCmd {
 }
 
 pub fn run_tray(running: Arc<AtomicBool>, cmd_rx: Receiver<TrayCmd>) -> anyhow::Result<()> {
+    #[allow(unused_imports)] // objc macro expansions reference these conditionally
     use objc::runtime::{Class, Object, BOOL, NO, YES};
     use objc::{class, msg_send, sel, sel_impl};
+    #[allow(unused_imports)]
     use std::ffi::c_void;
 
     fn get_status_icon(state: &UiState) -> &'static str {

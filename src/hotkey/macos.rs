@@ -1,7 +1,6 @@
 use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,11 +42,11 @@ fn listen_hotkey() -> Result<()> {
                     let _ = tx.try_send(HotkeyEvent::Pressed);
                 }
             }
-            EventType::KeyRelease(Key::Alt) | EventType::KeyRelease(Key::AltGr) => {
-                if ALT_PRESSED.load(Ordering::SeqCst) {
-                    ALT_PRESSED.store(false, Ordering::SeqCst);
-                    let _ = tx.try_send(HotkeyEvent::Released);
-                }
+            EventType::KeyRelease(Key::Alt) | EventType::KeyRelease(Key::AltGr)
+                if ALT_PRESSED.load(Ordering::SeqCst) =>
+            {
+                ALT_PRESSED.store(false, Ordering::SeqCst);
+                let _ = tx.try_send(HotkeyEvent::Released);
             }
             _ => {}
         }

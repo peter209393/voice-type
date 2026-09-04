@@ -36,11 +36,11 @@ impl IconData {
     #[cfg(not(feature = "gtk-tray"))]
     pub fn to_argb32_be(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.rgba.len());
-        for px in self.rgba.chunks_exact(4) {
-            out.push(px[3]); // A
-            out.push(px[0]); // R
-            out.push(px[1]); // G
-            out.push(px[2]); // B
+        for i in (0..self.rgba.len()).step_by(4) {
+            out.push(self.rgba[i + 3]); // A
+            out.push(self.rgba[i]); // R
+            out.push(self.rgba[i + 1]); // G
+            out.push(self.rgba[i + 2]); // B
         }
         out
     }

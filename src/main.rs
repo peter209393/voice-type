@@ -1,3 +1,7 @@
+// The objc crate's macros emit `cfg(cargo-clippy)` checks that newer rustc
+// flags as unexpected (macOS only); harmless everywhere.
+#![allow(unexpected_cfgs)]
+
 mod asr;
 mod audio;
 mod correct;
