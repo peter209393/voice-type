@@ -12,6 +12,7 @@ No dictation windows, no clicking — Voice Type turns any focused input box (br
 ## Features
 
 - 🗣️ **Real-time voice typing** — streaming ASR partials are typed live while you speak; no waiting for release
+- ✨ **Fast LLM correction** — after release, a non-thinking Doubao model (VolcEngine Ark) fixes homophones, punctuation and filler words, then quietly replaces the text
 - ⌨️ **Push-to-talk hotkey** — hold **Alt** / **Option** to record, release to finish
 - 🔁 **Self-correcting** — when the recognizer rewrites earlier words, the divergence is backspaced and retyped
 - ☁️ **Cloud ASR by default** — VolcEngine streaming (same engine & key as the [`pi-voice-input`](https://github.com/tr-nc/pi-voice-input) extension), with punctuation & ITN
@@ -88,6 +89,9 @@ First run downloads the model (~1.5 GB for `medium`, cached in `~/.cache/hugging
 | `VT_ASR_PROVIDER` | `auto` | `auto` (VolcEngine when keyed, else whisper), `volc`, `whisper` |
 | `VT_VOLC_API_KEY` | unset | VolcEngine key via env var — takes precedence over any config file |
 | `VT_VOLC_BOOSTING_TABLE_ID` | unset | VolcEngine hotwords table id |
+| `VT_ARK_API_KEY` | unset | VolcEngine Ark (ByteDance LLM) key — enables fast post-release transcript correction (homophones, punctuation, fillers) |
+| `VT_CORRECT_MODEL` | `doubao-seed-2-1-turbo-260628` | Ark model for correction — use a fast *non-thinking* model (thinking is auto-disabled for seed/1.6 models) |
+| `VT_CORRECT` | `1` | Set `0`/`off` to disable correction even when a key exists |
 | `VT_VOLC_CONFIG` | `~/.pi/agent/voice-input.config.json` | Shared pi-voice-input config file |
 | `VT_ASR_URL` | `http://127.0.0.1:8000` | faster-whisper server URL |
 | `VT_ASR_MODEL` | `medium` | faster-whisper model (`tiny`…`large-v3`) |

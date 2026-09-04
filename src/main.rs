@@ -1,5 +1,6 @@
 mod asr;
 mod audio;
+mod correct;
 mod hotkey;
 mod tray;
 mod typewriter;
@@ -7,16 +8,22 @@ mod volc;
 
 use anyhow::{Context, Result};
 use asr::StreamTranscriber;
+use correct::Corrector;
 use crossbeam_channel::{bounded, Select, SelectTimeoutError, Sender};
 use hotkey::HotkeyEvent;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use volc::{VolcEvent, VolcSession};
 
 const MIN_CHUNK_SAMPLES: usize = 8000;
 const VOLC_FINAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bumped on every hotkey press. Background correction threads capture it
+/// and abort their replacement if a new utterance has started meanwhile
+/// (their backspaces would otherwise destroy the new utterance's text).
+static UTTERANCE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Debug logging gated by `VT_LOG=1` (any non-empty value).
 macro_rules! vlog {
@@ -147,6 +154,49 @@ impl TypedState {
 /// partials already typed), and on failure fall back to local whisper ASR
 /// using the buffered recording.
 #[allow(clippy::too_many_arguments)] // event-loop plumbing, flat args are clearest here
+/// After the final transcript is on screen, run it through the Ark LLM
+/// corrector in the background and, if it differs, backspace over the typed
+/// text and retype the corrected version. Aborts when a new utterance has
+/// already started.
+fn spawn_correction(
+    corrector: &Arc<Corrector>,
+    typed_text: String,
+    cmd_tx: &Sender<tray::TrayCmd>,
+) {
+    if !corrector.enabled() || typed_text.trim().is_empty() {
+        return;
+    }
+    let utterance = UTTERANCE_ID.load(Ordering::SeqCst);
+    let corrector = Arc::clone(corrector);
+    let cmd_tx = cmd_tx.clone();
+    std::thread::spawn(move || {
+        match corrector.correct(&typed_text) {
+            Ok(fixed) if fixed != typed_text => {
+                if UTTERANCE_ID.load(Ordering::SeqCst) != utterance {
+                    vlog!("correction skipped: new utterance started");
+                    return;
+                }
+                vlog!("correction: {:?} -> {:?}", typed_text, fixed);
+                let n = typed_text.chars().count();
+                if let Err(e) = typewriter::backspace(n) {
+                    eprintln!("[vt] correction backspace failed: {e:#}");
+                    return;
+                }
+                if let Err(e) = typewriter::type_text_auto(&fixed) {
+                    eprintln!("[vt] correction retype failed: {e:#}");
+                    return;
+                }
+                let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Done {
+                    text: fixed,
+                }));
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[vt] transcript correction failed: {e:#}"),
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)] // event-loop plumbing, flat args are clearest here
 fn resolve_volc(
     res: Result<String, String>,
     volc_session: &mut Option<VolcSession>,
@@ -155,6 +205,7 @@ fn resolve_volc(
     buffer: &mut Vec<f32>,
     sample_rate: u32,
     transcriber: &Arc<StreamTranscriber>,
+    corrector: &Arc<Corrector>,
     cmd_tx: &Sender<tray::TrayCmd>,
 ) {
     *volc_session = None;
@@ -164,8 +215,9 @@ fn resolve_volc(
         Ok(text) if !text.trim().is_empty() => {
             let final_text = typed.type_towards(&text);
             let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Done {
-                text: final_text,
+                text: final_text.clone(),
             }));
+            spawn_correction(corrector, final_text, cmd_tx);
         }
         Ok(_) => {
             // Empty final result: keep whatever partials were already typed
@@ -173,9 +225,11 @@ fn resolve_volc(
             if typed.text.is_empty() {
                 let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Idle));
             } else {
+                let text = typed.text.clone();
                 let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Done {
-                    text: typed.text.clone(),
+                    text: text.clone(),
                 }));
+                spawn_correction(corrector, text, cmd_tx);
             }
         }
         Err(msg) => {
@@ -191,16 +245,19 @@ fn resolve_volc(
                 let samples = std::mem::take(buffer);
                 let sr = sample_rate;
                 let transcriber = Arc::clone(transcriber);
+                let corrector = Arc::clone(corrector);
                 let cmd_tx_clone = cmd_tx.clone();
                 std::thread::spawn(move || {
                     match transcriber.transcribe_chunk(&samples, sr) {
                         Ok(text) if !text.trim().is_empty() => {
-                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
-                                UiState::Done { text: text.trim().to_string() },
-                            ));
-                            if let Err(e) = typewriter::type_text_auto(text.trim()) {
+                            let trimmed = text.trim().to_string();
+                            if let Err(e) = typewriter::type_text_auto(&trimmed) {
                                 eprintln!("[vt] failed to type transcript: {e:#}");
                             }
+                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
+                                UiState::Done { text: trimmed.clone() },
+                            ));
+                            spawn_correction(&corrector, trimmed, &cmd_tx_clone);
                         }
                         _ => {
                             let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Idle));
@@ -219,6 +276,7 @@ fn resolve_volc(
 fn main() -> Result<()> {
     let dummy_path = PathBuf::from("/dev/null");
     let transcriber = Arc::new(StreamTranscriber::new("", &dummy_path));
+    let corrector = Arc::new(Corrector::new());
 
     let (audio_tx, audio_rx) = bounded::<Vec<f32>>(256);
     audio::add_sender(audio_tx);
@@ -286,6 +344,7 @@ fn main() -> Result<()> {
                             &mut buffer,
                             sample_rate,
                             &transcriber,
+                            &corrector,
                             &cmd_tx,
                         );
                     }
@@ -300,6 +359,7 @@ fn main() -> Result<()> {
                 Ok(HotkeyEvent::Pressed) => {
                     vlog!("hotkey pressed (was_recording={})", is_recording);
                     if !is_recording {
+                        UTTERANCE_ID.fetch_add(1, Ordering::SeqCst);
                         buffer.clear();
                         typed.reset();
                         volc_pending_since = None;
@@ -375,19 +435,23 @@ fn main() -> Result<()> {
                                 let samples = buffer.clone();
                                 let sr = sample_rate;
                                 let transcriber = Arc::clone(&transcriber);
+                                let corrector = Arc::clone(&corrector);
                                 let cmd_tx_clone = cmd_tx.clone();
                                 std::thread::spawn(move || {
                                     match transcriber.transcribe_chunk(&samples, sr) {
                                         Ok(text) if !text.trim().is_empty() => {
-                                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
-                                                UiState::Done { text: text.trim().to_string() },
-                                            ));
-                                            if let Err(e) = typewriter::type_text_auto(text.trim()) {
+                                            let trimmed = text.trim().to_string();
+                                            if let Err(e) = typewriter::type_text_auto(&trimmed) {
                                                 eprintln!("[vt] failed to type transcript: {e:#}");
                                                 let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
                                                     UiState::Error { msg: e.to_string() },
                                                 ));
+                                                return;
                                             }
+                                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
+                                                UiState::Done { text: trimmed.clone() },
+                                            ));
+                                            spawn_correction(&corrector, trimmed, &cmd_tx_clone);
                                         }
                                         Ok(_) => {
                                             let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Idle));
@@ -454,6 +518,7 @@ fn main() -> Result<()> {
                             &mut buffer,
                             sample_rate,
                             &transcriber,
+                            &corrector,
                             &cmd_tx,
                         );
                     }
@@ -474,6 +539,7 @@ fn main() -> Result<()> {
                                 &mut buffer,
                                 sample_rate,
                                 &transcriber,
+                                &corrector,
                                 &cmd_tx,
                             );
                         }
@@ -491,6 +557,7 @@ fn main() -> Result<()> {
                                 &mut buffer,
                                 sample_rate,
                                 &transcriber,
+                                &corrector,
                                 &cmd_tx,
                             );
                         }
