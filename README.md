@@ -4,6 +4,7 @@
 
 No dictation windows, no clicking — Voice Type turns any focused input box (browser, chat, editor, terminal) into a voice input box. Works on **Wayland** (sway, Hyprland, GNOME, KDE), **X11**, and **macOS**.
 
+[![CI](https://github.com/peter209393/voice-type/actions/workflows/ci.yml/badge.svg)](https://github.com/peter209393/voice-type/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-informational)
 ![Rust](https://img.shields.io/badge/rust-%F0%9F%A6%80-orange)
