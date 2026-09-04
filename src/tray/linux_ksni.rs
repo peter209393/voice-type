@@ -5,8 +5,8 @@ use std::time::Instant;
 use crossbeam_channel::Receiver;
 use ksni::{Tray, TrayService};
 
+use crate::tray::icons::{icon_for_state, IconData};
 use crate::UiState;
-use crate::tray::icons::{IconData, icon_for_state};
 
 pub enum TrayCmd {
     UpdateState(UiState),
@@ -41,9 +41,15 @@ impl StatePixmaps {
         };
         Self {
             idle: render(&UiState::Idle),
-            recording: render(&UiState::Recording { started_at: Instant::now() }),
-            transcribing: render(&UiState::Transcribing { started_at: Instant::now() }),
-            done: render(&UiState::Done { text: String::new() }),
+            recording: render(&UiState::Recording {
+                started_at: Instant::now(),
+            }),
+            transcribing: render(&UiState::Transcribing {
+                started_at: Instant::now(),
+            }),
+            done: render(&UiState::Done {
+                text: String::new(),
+            }),
             error: render(&UiState::Error { msg: String::new() }),
         }
     }

@@ -169,30 +169,26 @@ fn spawn_correction(
     let utterance = UTTERANCE_ID.load(Ordering::SeqCst);
     let corrector = Arc::clone(corrector);
     let cmd_tx = cmd_tx.clone();
-    std::thread::spawn(move || {
-        match corrector.correct(&typed_text) {
-            Ok(fixed) if fixed != typed_text => {
-                if UTTERANCE_ID.load(Ordering::SeqCst) != utterance {
-                    vlog!("correction skipped: new utterance started");
-                    return;
-                }
-                vlog!("correction: {:?} -> {:?}", typed_text, fixed);
-                let n = typed_text.chars().count();
-                if let Err(e) = typewriter::backspace(n) {
-                    eprintln!("[vt] correction backspace failed: {e:#}");
-                    return;
-                }
-                if let Err(e) = typewriter::type_text_auto(&fixed) {
-                    eprintln!("[vt] correction retype failed: {e:#}");
-                    return;
-                }
-                let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Done {
-                    text: fixed,
-                }));
+    std::thread::spawn(move || match corrector.correct(&typed_text) {
+        Ok(fixed) if fixed != typed_text => {
+            if UTTERANCE_ID.load(Ordering::SeqCst) != utterance {
+                vlog!("correction skipped: new utterance started");
+                return;
             }
-            Ok(_) => {}
-            Err(e) => eprintln!("[vt] transcript correction failed: {e:#}"),
+            vlog!("correction: {:?} -> {:?}", typed_text, fixed);
+            let n = typed_text.chars().count();
+            if let Err(e) = typewriter::backspace(n) {
+                eprintln!("[vt] correction backspace failed: {e:#}");
+                return;
+            }
+            if let Err(e) = typewriter::type_text_auto(&fixed) {
+                eprintln!("[vt] correction retype failed: {e:#}");
+                return;
+            }
+            let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Done { text: fixed }));
         }
+        Ok(_) => {}
+        Err(e) => eprintln!("[vt] transcript correction failed: {e:#}"),
     });
 }
 
@@ -247,21 +243,19 @@ fn resolve_volc(
                 let transcriber = Arc::clone(transcriber);
                 let corrector = Arc::clone(corrector);
                 let cmd_tx_clone = cmd_tx.clone();
-                std::thread::spawn(move || {
-                    match transcriber.transcribe_chunk(&samples, sr) {
-                        Ok(text) if !text.trim().is_empty() => {
-                            let trimmed = text.trim().to_string();
-                            if let Err(e) = typewriter::type_text_auto(&trimmed) {
-                                eprintln!("[vt] failed to type transcript: {e:#}");
-                            }
-                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
-                                UiState::Done { text: trimmed.clone() },
-                            ));
-                            spawn_correction(&corrector, trimmed, &cmd_tx_clone);
+                std::thread::spawn(move || match transcriber.transcribe_chunk(&samples, sr) {
+                    Ok(text) if !text.trim().is_empty() => {
+                        let trimmed = text.trim().to_string();
+                        if let Err(e) = typewriter::type_text_auto(&trimmed) {
+                            eprintln!("[vt] failed to type transcript: {e:#}");
                         }
-                        _ => {
-                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Idle));
-                        }
+                        let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Done {
+                            text: trimmed.clone(),
+                        }));
+                        spawn_correction(&corrector, trimmed, &cmd_tx_clone);
+                    }
+                    _ => {
+                        let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Idle));
                     }
                 });
             } else {
@@ -283,8 +277,7 @@ fn main() -> Result<()> {
 
     let running = Arc::new(AtomicBool::new(true));
 
-    let hotkey_rx = hotkey::start_hotkey_listener()
-        .context("Failed to start hotkey listener.")?;
+    let hotkey_rx = hotkey::start_hotkey_listener().context("Failed to start hotkey listener.")?;
 
     let (cmd_tx, cmd_rx) = bounded::<tray::TrayCmd>(16);
 
@@ -328,7 +321,12 @@ fn main() -> Result<()> {
         let selected = match sel.select_timeout(Duration::from_millis(50)) {
             Ok(op) => op,
             Err(SelectTimeoutError) => {
-                vlog!("tick: recording={} volc={} buffer={}", is_recording, volc_session.is_some(), buffer.len());
+                vlog!(
+                    "tick: recording={} volc={} buffer={}",
+                    is_recording,
+                    volc_session.is_some(),
+                    buffer.len()
+                );
                 if !is_recording {
                     while audio_rx.try_recv().is_ok() {}
                 }
@@ -364,7 +362,7 @@ fn main() -> Result<()> {
                         typed.reset();
                         volc_pending_since = None;
                         let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Recording {
-                            started_at: Instant::now()
+                            started_at: Instant::now(),
                         }));
 
                         // Default provider: VolcEngine streaming (pi-voice-input
@@ -386,14 +384,20 @@ fn main() -> Result<()> {
                         match audio::AudioEngine::start_default_input(None) {
                             Ok(engine) => {
                                 sample_rate = engine.sample_rate();
-                                vlog!("recording started: sr={} volc={}", sample_rate, volc_session.is_some());
+                                vlog!(
+                                    "recording started: sr={} volc={}",
+                                    sample_rate,
+                                    volc_session.is_some()
+                                );
                                 audio_engine = Some(engine);
                                 is_recording = true;
                             }
                             Err(e) => {
                                 eprintln!("Failed to start recording: {:#}", e);
                                 volc_session = None;
-                                let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Error { msg: e.to_string() }));
+                                let _ = cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Error {
+                                    msg: e.to_string(),
+                                }));
                             }
                         }
                     }
@@ -415,13 +419,17 @@ fn main() -> Result<()> {
                         is_recording = false;
 
                         if let Some(session) = volc_session.as_ref() {
-                            vlog!("release: streaming path, buffer={} samples, waiting for final", buffer.len());
+                            vlog!(
+                                "release: streaming path, buffer={} samples, waiting for final",
+                                buffer.len()
+                            );
                             // Streaming path: partials were already typed
                             // live; flush the last packet and wait for the
                             // final result (handled by the volc-event arm).
-                            let _ = cmd_tx.send(tray::TrayCmd::UpdateState(
-                                UiState::Transcribing { started_at: Instant::now() },
-                            ));
+                            let _ =
+                                cmd_tx.send(tray::TrayCmd::UpdateState(UiState::Transcribing {
+                                    started_at: Instant::now(),
+                                }));
                             session.finish();
                             volc_pending_since = Some(Instant::now());
                         } else {
@@ -430,7 +438,9 @@ fn main() -> Result<()> {
                             // recording after release, then type it.
                             if buffer.len() >= MIN_CHUNK_SAMPLES {
                                 let _ = cmd_tx.send(tray::TrayCmd::UpdateState(
-                                    UiState::Transcribing { started_at: Instant::now() },
+                                    UiState::Transcribing {
+                                        started_at: Instant::now(),
+                                    },
                                 ));
                                 let samples = buffer.clone();
                                 let sr = sample_rate;
@@ -443,22 +453,28 @@ fn main() -> Result<()> {
                                             let trimmed = text.trim().to_string();
                                             if let Err(e) = typewriter::type_text_auto(&trimmed) {
                                                 eprintln!("[vt] failed to type transcript: {e:#}");
-                                                let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
-                                                    UiState::Error { msg: e.to_string() },
-                                                ));
+                                                let _ =
+                                                    cmd_tx_clone.send(tray::TrayCmd::UpdateState(
+                                                        UiState::Error { msg: e.to_string() },
+                                                    ));
                                                 return;
                                             }
                                             let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
-                                                UiState::Done { text: trimmed.clone() },
+                                                UiState::Done {
+                                                    text: trimmed.clone(),
+                                                },
                                             ));
                                             spawn_correction(&corrector, trimmed, &cmd_tx_clone);
                                         }
                                         Ok(_) => {
-                                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Idle));
+                                            let _ = cmd_tx_clone
+                                                .send(tray::TrayCmd::UpdateState(UiState::Idle));
                                         }
                                         Err(e) => {
                                             eprintln!("Transcription error: {:#}", e);
-                                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(UiState::Error { msg: e.to_string() }));
+                                            let _ = cmd_tx_clone.send(tray::TrayCmd::UpdateState(
+                                                UiState::Error { msg: e.to_string() },
+                                            ));
                                         }
                                     }
                                 });
@@ -477,7 +493,8 @@ fn main() -> Result<()> {
         } else if idx == op_audio {
             if let Ok(chunk) = selected.recv(&audio_rx) {
                 if is_recording {
-                    static AUDIO_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    static AUDIO_N: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
                     let n = AUDIO_N.fetch_add(1, Ordering::Relaxed);
                     if n.is_multiple_of(50) {
                         vlog!("audio chunk #{} len={}", n, chunk.len());
@@ -491,12 +508,10 @@ fn main() -> Result<()> {
         } else if op_volc == Some(idx) {
             // Receive the event first so the immutable borrow of the session
             // ends before the arms below take `&mut volc_session`.
-            let ev = volc_events
-                .as_ref()
-                .map(|rx| selected.recv(rx));
+            let ev = volc_events.as_ref().map(|rx| selected.recv(rx));
             if let Some(ev) = ev {
-            match ev {
-                Ok(VolcEvent::Ready) => vlog!("volc: ready"),
+                match ev {
+                    Ok(VolcEvent::Ready) => vlog!("volc: ready"),
                     Ok(VolcEvent::Partial(text)) => {
                         // Live preview: type the delta at the cursor while
                         // still recording. The hotkey is remapped to a

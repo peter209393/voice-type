@@ -63,9 +63,7 @@ impl AudioEngine {
                 });
                 if std::env::var_os("VT_LOG").is_some_and(|v| !v.is_empty()) {
                     if let Ok(devs) = host.input_devices() {
-                        let names: Vec<String> = devs
-                            .filter_map(|d| d.name().ok())
-                            .collect();
+                        let names: Vec<String> = devs.filter_map(|d| d.name().ok()).collect();
                         eprintln!(
                             "[vt] input devices: {:?}; picked: {:?}; default: {:?}",
                             names,

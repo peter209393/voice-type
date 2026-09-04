@@ -5,10 +5,10 @@ mod linux;
 mod macos;
 
 #[cfg(target_os = "linux")]
-pub use linux::{HotkeyEvent, shutdown, start_hotkey_listener};
+pub use linux::{shutdown, start_hotkey_listener, HotkeyEvent};
 
 #[cfg(target_os = "macos")]
-pub use macos::{HotkeyEvent, start_hotkey_listener};
+pub use macos::{start_hotkey_listener, HotkeyEvent};
 
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]

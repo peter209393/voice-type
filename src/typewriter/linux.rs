@@ -119,7 +119,13 @@ fn backspace_with_ydotool(n: usize) -> Result<()> {
 
 fn backspace_with_xdotool(n: usize) -> Result<()> {
     let status = Command::new("xdotool")
-        .args(["key", "--repeat", &n.to_string(), "--clearmodifiers", "BackSpace"])
+        .args([
+            "key",
+            "--repeat",
+            &n.to_string(),
+            "--clearmodifiers",
+            "BackSpace",
+        ])
         .status()
         .context("Failed to execute xdotool (backspace)")?;
     if !status.success() {

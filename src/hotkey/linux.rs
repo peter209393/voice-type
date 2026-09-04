@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use evdev::{Device, EventType, InputEventKind, Key};
+use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -41,6 +42,52 @@ struct RestoreEntry {
 
 /// Populated once at startup, before the signal handler is installed, and
 /// never mutated afterwards (the signal handler reads it lock-free).
+/// Serialize scancode remap/restore ACROSS instances. Overlapping remaps
+/// from a dying instance's signal-handler restore and a freshly started
+/// instance have corrupted the kernel keycode table in the wild (atkbd
+/// XOR-toggles the old keycode's capability bit), leaving the physical key
+/// dead. Every mutation of the keymap takes this lock first.
+fn keymap_lock_path() -> PathBuf {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join("voice-type.keymap.lock")
+}
+
+/// Blocking (bounded) exclusive lock.
+fn lock_keymap() -> Option<File> {
+    let f = File::create(keymap_lock_path()).ok()?;
+    for _ in 0..200 {
+        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Some(f);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    eprintln!("[vt] timed out waiting for the keymap lock; proceeding anyway");
+    Some(f)
+}
+
+/// Signal-safe raw lock: bounded spin using only syscalls. Returns an fd to
+/// close, or -1.
+unsafe fn lock_keymap_raw() -> libc::c_int {
+    let path = keymap_lock_path();
+    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return -1;
+    };
+    let fd = libc::open(cpath.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o600);
+    if fd < 0 {
+        return -1;
+    }
+    for _ in 0..200 {
+        if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) == 0 {
+            return fd;
+        }
+        libc::usleep(10_000);
+    }
+    fd // proceed unlocked rather than hang the handler
+}
+
 static RESTORES: OnceLock<Vec<RestoreEntry>> = OnceLock::new();
 /// Guards the initialization (single writer); `RESTORES` itself is frozen
 /// once set.
@@ -55,7 +102,7 @@ const EVIOCSKEYCODE_V2: libc::c_ulong = 0x4028_4504;
 fn keymap_entry_bytes(keycode: u32, scancode: &[u8]) -> [u8; 40] {
     let mut e = [0u8; 40];
     e[1] = scancode.len() as u8; // len
-    // index stays 0 (unused; flags = 0 means "by scancode")
+                                 // index stays 0 (unused; flags = 0 means "by scancode")
     e[4..8].copy_from_slice(&keycode.to_ne_bytes());
     e[8..8 + scancode.len()].copy_from_slice(scancode);
     e
@@ -64,15 +111,23 @@ fn keymap_entry_bytes(keycode: u32, scancode: &[u8]) -> [u8; 40] {
 /// Signal-safe restore: raw syscalls only (open/ioctl/close/_exit).
 extern "C" fn restore_on_signal(_sig: libc::c_int) {
     unsafe {
+        let lock_fd = lock_keymap_raw();
         if let Some(restores) = RESTORES.get() {
             for r in restores {
                 let fd = libc::open(r.cpath.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK);
                 if fd >= 0 {
                     let mut entry = r.entry;
-                    libc::ioctl(fd, EVIOCSKEYCODE_V2, entry.as_mut_ptr() as *mut libc::c_void);
+                    libc::ioctl(
+                        fd,
+                        EVIOCSKEYCODE_V2,
+                        entry.as_mut_ptr() as *mut libc::c_void,
+                    );
                     libc::close(fd);
                 }
             }
+        }
+        if lock_fd >= 0 {
+            libc::close(lock_fd);
         }
         libc::_exit(0);
     }
@@ -81,6 +136,7 @@ extern "C" fn restore_on_signal(_sig: libc::c_int) {
 /// Restore all remapped scancodes to their original keycodes. Called on
 /// normal shutdown (and from the SIGINT/SIGTERM handler above).
 pub fn shutdown() {
+    let _lock = lock_keymap();
     if let Some(restores) = RESTORES.get() {
         for r in restores {
             if let Ok(dev) = Device::open(&r.path) {
@@ -193,13 +249,37 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
     // pollute synthetic typing with a seat-wide modifier (see HOTKEY_KEYCODE
     // docs). Devices whose driver refuses the remap (e.g. uinput test
     // injectors) keep emitting the original keycode — we listen for both.
+    // All keymap mutations are serialized across instances (a dying
+    // instance's signal-handler restore racing a fresh instance's remap
+    // corrupted the kernel keymap in the wild) and each remap is verified
+    // by reading the mapping back.
+    let _keymap_lock = lock_keymap();
     let mut restores: Vec<RestoreEntry> = Vec::new();
     for (path, dev) in &devices {
-        for sc in scancodes_for(dev, target_key) {
+        // Self-heal: restore any leftover remap from a crashed instance
+        // first, so the scancode is found under its original keycode again.
+        for sc in scancodes_for(dev, HOTKEY_KEYCODE) {
+            eprintln!(
+                "[vt] healing leftover hotkey remap on {:?} (scancode {:02x?})",
+                path, sc
+            );
+            let _ = dev.update_scancode(target_key, &sc);
+        }
+    }
+    for (path, dev) in &devices {
+        'scancode: for sc in scancodes_for(dev, target_key) {
             if dev.update_scancode(HOTKEY_KEYCODE, &sc).is_ok() {
-                let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-                else {
-                    continue;
+                // Round-trip verification: the driver may accept the write
+                // without actually applying it.
+                let applied = scancodes_for(dev, HOTKEY_KEYCODE);
+                if !applied.iter().any(|s| s == &sc) {
+                    eprintln!("[vt] hotkey remap on {:?} did not stick; reverting", path);
+                    let _ = dev.update_scancode(target_key, &sc);
+                    continue 'scancode;
+                }
+                let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+                    let _ = dev.update_scancode(target_key, &sc);
+                    continue 'scancode;
                 };
                 restores.push(RestoreEntry {
                     path: path.clone(),
@@ -209,6 +289,7 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
             }
         }
     }
+    drop(_keymap_lock); // release before installing the signal handler
     if !restores.is_empty() {
         if std::env::var_os("VT_LOG").is_some_and(|v| !v.is_empty()) {
             for r in &restores {
@@ -223,8 +304,14 @@ fn listen_hotkey(tx: Sender<HotkeyEvent>) -> Result<()> {
         // Restore the key mapping even when killed, so the physical key
         // cannot stay remapped after a crash of the session.
         unsafe {
-            libc::signal(libc::SIGINT, restore_on_signal as extern "C" fn(libc::c_int) as usize as libc::sighandler_t);
-            libc::signal(libc::SIGTERM, restore_on_signal as extern "C" fn(libc::c_int) as usize as libc::sighandler_t);
+            libc::signal(
+                libc::SIGINT,
+                restore_on_signal as extern "C" fn(libc::c_int) as usize as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGTERM,
+                restore_on_signal as extern "C" fn(libc::c_int) as usize as libc::sighandler_t,
+            );
         }
     }
 

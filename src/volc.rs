@@ -19,10 +19,10 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
-use tokio::sync::mpsc;
 
 use crate::asr::resample_to_16k;
 
@@ -80,8 +80,8 @@ pub fn load_config() -> Result<VolcConfig> {
     let path = std::env::var("VT_VOLC_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_config_path());
-    let raw =
-        std::fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     let v: Value = serde_json::from_str(&raw).context("invalid voice input config JSON")?;
     Ok(VolcConfig {
         api_key: v
@@ -110,7 +110,9 @@ fn default_config_path() -> PathBuf {
 
 /// True when the VolcEngine provider can be used (key present).
 pub fn available() -> bool {
-    load_config().map(|c| !c.api_key.is_empty()).unwrap_or(false)
+    load_config()
+        .map(|c| !c.api_key.is_empty())
+        .unwrap_or(false)
 }
 
 pub enum VolcCmd {
@@ -172,7 +174,10 @@ impl VolcSession {
             })
             .context("failed to spawn volc-asr worker thread")?;
 
-        Ok(Self { cmd_tx, events: ev_rx })
+        Ok(Self {
+            cmd_tx,
+            events: ev_rx,
+        })
     }
 
     /// Queues an audio chunk (any sample rate, mono f32); drops silently if
@@ -205,7 +210,9 @@ async fn run(
     cfg: VolcConfig,
 ) -> Result<()> {
     let connect_id = uuid::Uuid::new_v4().to_string();
-    let mut req = WS_URL.into_client_request().context("invalid ASR websocket URL")?;
+    let mut req = WS_URL
+        .into_client_request()
+        .context("invalid ASR websocket URL")?;
     let headers = req.headers_mut();
     headers.insert("X-Api-Key", HeaderValue::from_str(&cfg.api_key)?);
     headers.insert("X-Api-Resource-Id", HeaderValue::from_static(RESOURCE_ID));
@@ -224,7 +231,9 @@ async fn run(
 
     // 1) full request (session config) with sequence 1
     write
-        .send(Message::Binary(full_request(1, &request_payload(&cfg))?.into()))
+        .send(Message::Binary(
+            full_request(1, &request_payload(&cfg))?.into(),
+        ))
         .await
         .context("failed to send ASR full request")?;
     let mut seq: i32 = 2;
@@ -237,7 +246,11 @@ async fn run(
     let mut finished = false;
 
     loop {
-        let read_timeout = if finished { FINAL_TIMEOUT } else { IDLE_TIMEOUT };
+        let read_timeout = if finished {
+            FINAL_TIMEOUT
+        } else {
+            IDLE_TIMEOUT
+        };
         tokio::select! {
             cmd = cmd_rx.recv(), if !finished => {
                 match cmd {
@@ -334,7 +347,12 @@ fn request_payload(cfg: &VolcConfig) -> Value {
 // ---------------------------------------------------------------------------
 
 fn frame_header(message_type: u8, flags: u8, serialization: u8, compression: u8) -> [u8; 4] {
-    [0x11, (message_type << 4) | flags, (serialization << 4) | compression, 0]
+    [
+        0x11,
+        (message_type << 4) | flags,
+        (serialization << 4) | compression,
+        0,
+    ]
 }
 
 /// protocol version 1, header size 1 (4 bytes)
@@ -356,7 +374,11 @@ fn full_request(seq: i32, payload: &Value) -> Result<Vec<u8>> {
 /// Audio-only packet; the last packet uses a negative sequence + flag 0b0011.
 fn audio_request(seq: i32, audio: &[u8], is_last: bool) -> Result<Vec<u8>> {
     let body = gzip(audio)?;
-    let flags = if is_last { FLAG_NEG_WITH_SEQUENCE } else { FLAG_POS_SEQUENCE };
+    let flags = if is_last {
+        FLAG_NEG_WITH_SEQUENCE
+    } else {
+        FLAG_POS_SEQUENCE
+    };
     let wire_seq = if is_last { -seq } else { seq };
     let mut out = Vec::with_capacity(16 + body.len());
     out.extend_from_slice(&frame_header(
@@ -459,7 +481,10 @@ fn extract_text(payload: &Value) -> String {
             return text.to_string();
         }
     }
-    if let Some(utts) = payload.pointer("/result/utterances").and_then(Value::as_array) {
+    if let Some(utts) = payload
+        .pointer("/result/utterances")
+        .and_then(Value::as_array)
+    {
         let joined: String = utts
             .iter()
             .filter_map(|u| u.get("text").and_then(Value::as_str))
@@ -540,7 +565,8 @@ mod tests {
 
     #[test]
     fn parse_last_frame_with_utterances_fallback() {
-        let payload = json!({"result": {"text": "", "utterances": [{"text": "a "}, {"text": "b"}]}});
+        let payload =
+            json!({"result": {"text": "", "utterances": [{"text": "a "}, {"text": "b"}]}});
         let frame = server_full_frame(9, &payload, true);
         let parsed = parse_frame(&frame).unwrap();
         assert!(parsed.is_last);

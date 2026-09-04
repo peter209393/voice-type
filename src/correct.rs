@@ -40,7 +40,10 @@ impl Corrector {
             .to_string();
         let enabled = !api_key.is_empty()
             && !matches!(
-                std::env::var("VT_CORRECT").unwrap_or_default().to_lowercase().as_str(),
+                std::env::var("VT_CORRECT")
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .as_str(),
                 "0" | "false" | "no" | "off"
             );
 
@@ -76,9 +79,7 @@ impl Corrector {
         if !self.enabled || raw.trim().is_empty() {
             return Ok(raw.to_string());
         }
-        self.runtime
-            .handle()
-            .block_on(self.correct_async(raw))
+        self.runtime.handle().block_on(self.correct_async(raw))
     }
 
     async fn correct_async(&self, raw: &str) -> Result<String> {

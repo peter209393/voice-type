@@ -19,8 +19,8 @@ pub struct StreamTranscriber {
 
 impl StreamTranscriber {
     pub fn new(_whisper_bin: &str, _model_path: &std::path::Path) -> Self {
-        let asr_url = std::env::var("VT_ASR_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8000".to_string());
+        let asr_url =
+            std::env::var("VT_ASR_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string());
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -69,7 +69,10 @@ impl StreamTranscriber {
 
         let form = Form::new().part("file", file_part);
 
-        let url = format!("{}/v1/audio/transcriptions", self.asr_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/audio/transcriptions",
+            self.asr_url.trim_end_matches('/')
+        );
         let response = self
             .client
             .post(&url)
@@ -113,8 +116,8 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>> {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let mut writer = hound::WavWriter::new(&mut cursor, spec)
-        .context("Failed to create WAV writer")?;
+    let mut writer =
+        hound::WavWriter::new(&mut cursor, spec).context("Failed to create WAV writer")?;
 
     // Convert f32 (-1.0 to 1.0) to i16
     for &sample in samples {

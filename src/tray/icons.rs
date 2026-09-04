@@ -119,7 +119,10 @@ fn sd_mic(x: f32, y: f32) -> f32 {
     let d = 35.0_f32.to_radians();
     let a = 145.0_f32.to_radians();
     let bracket = sd_arc(x, y, 16.0, MIC_ARC_CY, MIC_ARC_R, d, a, MIC_ARC_HALF);
-    let stem = stroke(sd_segment(x, y, 16.0, MIC_ARC_CY + MIC_ARC_R, 16.0, 25.2), MIC_STROKE);
+    let stem = stroke(
+        sd_segment(x, y, 16.0, MIC_ARC_CY + MIC_ARC_R, 16.0, 25.2),
+        MIC_STROKE,
+    );
     let base = stroke(sd_segment(x, y, 12.6, 25.3, 19.4, 25.3), MIC_STROKE);
     body.min(bracket).min(stem).min(base)
 }
@@ -160,11 +163,11 @@ const WHITE: Rgba = rgba(255, 255, 255);
 /// extent. Vertical gradients give the flat badge an instant "material" feel.
 fn badge_gradient(state: &UiState) -> (Rgba, Rgba) {
     match state {
-        UiState::Idle => (rgba(158, 166, 181), rgba(93, 101, 119)),   // slate
-        UiState::Recording { .. } => (rgba(247, 94, 80), rgba(205, 32, 32)),  // vivid red
+        UiState::Idle => (rgba(158, 166, 181), rgba(93, 101, 119)), // slate
+        UiState::Recording { .. } => (rgba(247, 94, 80), rgba(205, 32, 32)), // vivid red
         UiState::Transcribing { .. } => (rgba(255, 200, 92), rgba(236, 137, 12)), // amber
-        UiState::Done { .. } => (rgba(88, 199, 142), rgba(28, 141, 88)),  // green
-        UiState::Error { .. } => (rgba(235, 64, 52), rgba(148, 16, 16)),  // deep red
+        UiState::Done { .. } => (rgba(88, 199, 142), rgba(28, 141, 88)), // green
+        UiState::Error { .. } => (rgba(235, 64, 52), rgba(148, 16, 16)), // deep red
     }
 }
 
@@ -208,11 +211,7 @@ impl Canvas {
 
     /// Rasterize one layer: `sdf` describes the shape's coverage (negative
     /// inside), `paint` returns the color per design-space sample point.
-    fn fill(
-        &mut self,
-        sdf: impl Fn(f32, f32) -> f32,
-        paint: impl Fn(f32, f32) -> Rgba,
-    ) {
+    fn fill(&mut self, sdf: impl Fn(f32, f32) -> f32, paint: impl Fn(f32, f32) -> Rgba) {
         let s = self.size as i32;
         let scale = DESIGN / self.size as f32; // design units per pixel
         for py in 0..s {
@@ -299,9 +298,10 @@ pub fn icon_for_state(state: &UiState) -> IconData {
     });
 
     // Layer 3: subtle darker rim so the badge reads on any bar background.
-    cv.fill(|x, y| stroke(badge_sdf(x, y), 0.5), |_, _| {
-        [0.0, 0.0, 0.0, 72.0]
-    });
+    cv.fill(
+        |x, y| stroke(badge_sdf(x, y), 0.5),
+        |_, _| [0.0, 0.0, 0.0, 72.0],
+    );
 
     // Layer 4: state glyph in white.
     let glyph = match state {
@@ -358,9 +358,15 @@ mod preview {
     fn render_previews() {
         let states = [
             UiState::Idle,
-            UiState::Recording { started_at: Instant::now() },
-            UiState::Transcribing { started_at: Instant::now() },
-            UiState::Done { text: String::new() },
+            UiState::Recording {
+                started_at: Instant::now(),
+            },
+            UiState::Transcribing {
+                started_at: Instant::now(),
+            },
+            UiState::Done {
+                text: String::new(),
+            },
             UiState::Error { msg: String::new() },
         ];
         let backgrounds: [[u8; 3]; 2] = [[243, 243, 246], [32, 32, 40]];

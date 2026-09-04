@@ -7,8 +7,8 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, TryRecvError};
 use gtk::prelude::*;
 
+use crate::tray::icons::{icon_for_state, IconData, ICON_SIZE};
 use crate::UiState;
-use crate::tray::icons::{ICON_SIZE, IconData, icon_for_state};
 
 pub enum TrayCmd {
     UpdateState(UiState),
@@ -61,14 +61,23 @@ fn install_icon_theme() -> anyhow::Result<PathBuf> {
     let states: [(UiState, &str); 5] = [
         (UiState::Idle, "voice-type-idle"),
         (
-            UiState::Recording { started_at: Instant::now() },
+            UiState::Recording {
+                started_at: Instant::now(),
+            },
             "voice-type-recording",
         ),
         (
-            UiState::Transcribing { started_at: Instant::now() },
+            UiState::Transcribing {
+                started_at: Instant::now(),
+            },
             "voice-type-transcribing",
         ),
-        (UiState::Done { text: String::new() }, "voice-type-done"),
+        (
+            UiState::Done {
+                text: String::new(),
+            },
+            "voice-type-done",
+        ),
         (UiState::Error { msg: String::new() }, "voice-type-error"),
     ];
     for (state, name) in &states {
